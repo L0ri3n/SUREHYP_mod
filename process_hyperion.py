@@ -1050,7 +1050,26 @@ if __name__ == '__main__':
 
         img = envi.open(hdr_path, img_path)
         R = img.load()
-        bands = np.array([float(w) for w in img.metadata['wavelength']])
+
+        # Try to get wavelengths from HDR, or fall back to spectral_info.txt
+        if 'wavelength' in img.metadata:
+            bands = np.array([float(w) for w in img.metadata['wavelength']])
+        else:
+            # Load wavelengths from the spectral info file (created by fix_envi_hdr_for_snap)
+            spectral_info_path = pathToReflectanceImage + '_spectral_info.txt'
+            if os.path.exists(spectral_info_path):
+                bands = []
+                with open(spectral_info_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('#') or not line.strip():
+                            continue
+                        parts = line.strip().split(',')
+                        if len(parts) >= 2:
+                            bands.append(float(parts[1].strip()))
+                bands = np.array(bands)
+                print(f'    Loaded wavelengths from: {spectral_info_path}')
+            else:
+                raise ValueError(f"No wavelength data found in HDR or spectral info file: {spectral_info_path}")
     else:
         pathToReflectanceImage, R, bands = atmospheric_correction(
             pathToRadianceImage,
