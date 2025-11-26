@@ -75,12 +75,17 @@ def fix_envi_hdr_for_snap(hdr_path, wavelength_file=None, keep_wavelength=False)
                 if not line or line.startswith('#'):
                     continue
 
-                # Try comma-separated format first (wavelength, fwhm)
+                # Try comma-separated format first (band_name, wavelength, fwhm)
                 if ',' in line:
                     parts = line.split(',')
-                    wavelengths.append(parts[0].strip())
-                    if len(parts) > 1:
-                        fwhm_values.append(parts[1].strip())
+                    # If format is "band_X, wavelength, fwhm", take parts[1] as wavelength
+                    if len(parts) >= 2:
+                        wavelengths.append(parts[1].strip())
+                        if len(parts) >= 3:
+                            fwhm_values.append(parts[2].strip())
+                    else:
+                        # Fallback: single value
+                        wavelengths.append(parts[0].strip())
                 else:
                     # Single wavelength per line
                     wavelengths.append(line)
@@ -1079,13 +1084,13 @@ if __name__ == '__main__':
 
     # Option 1: Load wavelengths from external file (e.g., custom spectral calibration)
     # Set to None to use wavelengths computed during processing
-    snap_wavelength_file = None
+    snap_wavelength_file = "C:/Lorien/Archivos/TUBAF/1st_Semester/Remote_Sensing/OUT/EO1H2020342016359110KF_reflectance_spectral_info.txt"
     # Example: snap_wavelength_file = basePath + 'OUT/EO1H2020342016359110KF_reflectance_spectral_info.txt'
 
     # Option 2: Keep wavelength field in HDR file
     # - True: Better for SNAP visualization (wavelength labels show in plots)
     # - False: Safer for SNAP band math expressions (avoids "Undefined function" errors)
-    snap_keep_wavelength = True  # Try setting to True for better SNAP visualization
+    snap_keep_wavelength = True  # Set to True to include wavelengths in HDR for SNAP
 
     # ============================================================
     # RUN PROCESSING
