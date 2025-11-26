@@ -23,21 +23,28 @@ import surehyp.atmoCorrection
 import re
 
 
-def fix_envi_hdr_for_snap(hdr_path):
+def fix_envi_hdr_for_snap(hdr_path, wavelength_file=None, keep_wavelength=False):
     """
     Fix ENVI header files to be compatible with SNAP.
 
     SNAP automatically appends wavelength values in parentheses to band names,
     which causes "Undefined function" errors in SNAP's expression parser.
 
-    Solution: Remove the 'wavelength' field from the HDR (SNAP doesn't need it
-    for basic viewing) and save it separately. The wavelength info is preserved
-    in the band names and in a separate metadata file.
+    Solution options:
+    1. Remove wavelength field (default, safest for SNAP expressions)
+    2. Keep wavelength field (keep_wavelength=True) for better SNAP visualization
+    3. Load wavelengths from external file for custom spectral info
 
     Parameters:
     -----------
     hdr_path : str
         Path to the .hdr file to fix
+    wavelength_file : str, optional
+        Path to a .txt file containing wavelength values (one per line or comma-separated)
+        Format: Can be CSV with wavelength,fwhm or plain text with one wavelength per line
+    keep_wavelength : bool, optional
+        If True, keep wavelength field in HDR (better for SNAP visualization but may
+        cause issues with band math expressions). Default: False
     """
     if not os.path.exists(hdr_path):
         print(f"    Warning: HDR file not found: {hdr_path}")
@@ -55,12 +62,37 @@ def fix_envi_hdr_for_snap(hdr_path):
         wl_str = wavelength_match.group(1)
         wavelengths = [w.strip() for w in wl_str.split(',') if w.strip()]
 
-    # Extract fwhm before removing
-    fwhm_match = re.search(r'fwhm\s*=\s*\{([^}]*)\}', content, re.IGNORECASE)
-    fwhm_values = []
-    if fwhm_match:
-        fwhm_str = fwhm_match.group(1)
-        fwhm_values = [f.strip() for f in fwhm_str.split(',') if f.strip()]
+    # If external wavelength file provided, load wavelengths from there
+    if wavelength_file and os.path.exists(wavelength_file):
+        print(f"    Loading wavelengths from external file: {wavelength_file}")
+        wavelengths = []
+        fwhm_values = []
+
+        with open(wavelength_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                # Skip comments and empty lines
+                if not line or line.startswith('#'):
+                    continue
+
+                # Try comma-separated format first (wavelength, fwhm)
+                if ',' in line:
+                    parts = line.split(',')
+                    wavelengths.append(parts[0].strip())
+                    if len(parts) > 1:
+                        fwhm_values.append(parts[1].strip())
+                else:
+                    # Single wavelength per line
+                    wavelengths.append(line)
+
+        print(f"    Loaded {len(wavelengths)} wavelengths from file")
+    else:
+        # Extract fwhm before removing (only if not loading from file)
+        fwhm_match = re.search(r'fwhm\s*=\s*\{([^}]*)\}', content, re.IGNORECASE)
+        fwhm_values = []
+        if fwhm_match:
+            fwhm_str = fwhm_match.group(1)
+            fwhm_values = [f.strip() for f in fwhm_str.split(',') if f.strip()]
 
     # Save wavelength and fwhm to a separate metadata file for reference
     if wavelengths:
@@ -92,11 +124,35 @@ def fix_envi_hdr_for_snap(hdr_path):
             return f'{field_name} = {{ {fixed_content} }}'
         content = re.sub(r'(band names)\s*=\s*\{([^}]*)\}', fix_band_names, content, flags=re.IGNORECASE)
 
-    # CRITICAL: Remove wavelength field - this is what causes SNAP to append (wavelength) to band names
-    content = re.sub(r'\nwavelength\s*=\s*\{[^}]*\}', '', content, flags=re.IGNORECASE)
+    # Handle wavelength field based on keep_wavelength flag
+    if keep_wavelength and wavelengths:
+        # Keep/add wavelength field for SNAP (better visualization)
+        print("    Keeping wavelength field in HDR for SNAP compatibility")
+        wavelength_str = ' , '.join(wavelengths)
 
-    # Also remove fwhm as it's not needed for SNAP viewing and can cause issues
-    content = re.sub(r'\nfwhm\s*=\s*\{[^}]*\}', '', content, flags=re.IGNORECASE)
+        if re.search(r'wavelength\s*=', content, re.IGNORECASE):
+            # Update existing wavelength field
+            content = re.sub(r'wavelength\s*=\s*\{[^}]*\}', f'wavelength = {{ {wavelength_str} }}', content, flags=re.IGNORECASE)
+        else:
+            # Add wavelength field after band names
+            if re.search(r'band names\s*=', content, re.IGNORECASE):
+                content = re.sub(r'(band names\s*=\s*\{[^}]*\})', f'\\1\nwavelength = {{ {wavelength_str} }}', content, flags=re.IGNORECASE)
+            else:
+                content = re.sub(r'(bands\s*=\s*\d+)', f'\\1\nwavelength = {{ {wavelength_str} }}', content)
+
+        # Also add/update FWHM if available
+        if fwhm_values:
+            fwhm_str = ' , '.join(fwhm_values)
+            if re.search(r'fwhm\s*=', content, re.IGNORECASE):
+                content = re.sub(r'fwhm\s*=\s*\{[^}]*\}', f'fwhm = {{ {fwhm_str} }}', content, flags=re.IGNORECASE)
+            else:
+                content = re.sub(r'(wavelength\s*=\s*\{[^}]*\})', f'\\1\nfwhm = {{ {fwhm_str} }}', content, flags=re.IGNORECASE)
+    else:
+        # CRITICAL: Remove wavelength field - this is what causes SNAP to append (wavelength) to band names
+        content = re.sub(r'\nwavelength\s*=\s*\{[^}]*\}', '', content, flags=re.IGNORECASE)
+
+        # Also remove fwhm as it's not needed for SNAP viewing and can cause issues
+        content = re.sub(r'\nfwhm\s*=\s*\{[^}]*\}', '', content, flags=re.IGNORECASE)
 
     # Clean up scale factor field formatting if present
     scale_match = re.search(r'(scale factor)\s*=\s*\{([^}]*)\}', content, re.IGNORECASE)
@@ -117,7 +173,12 @@ def fix_envi_hdr_for_snap(hdr_path):
         with open(hdr_path, 'w') as f:
             f.write(content)
         print(f"    Fixed HDR file for SNAP compatibility: {hdr_path}")
-        print(f"    Spectral info saved to: {hdr_path.replace('.hdr', '_spectral_info.txt')}")
+        if wavelengths:
+            print(f"    Spectral info saved to: {hdr_path.replace('.hdr', '_spectral_info.txt')}")
+        if keep_wavelength:
+            print(f"    Wavelength field kept in HDR for visualization")
+        else:
+            print(f"    Wavelength field removed from HDR to avoid band math issues")
     else:
         print(f"    HDR file already SNAP-compatible: {hdr_path}")
 
@@ -396,8 +457,11 @@ def preprocess_radiance(fname, pathToL1Rmetadata, pathToL1Rimages, pathToL1Timag
     surehyp.preprocess.savePreprocessedL1R(arrayL1Rgeoreferenced, wavelengths, fwhms, metadataGeoreferenced,
                                             pathToL1Rimages, pathToL1Rmetadata, metadata, fname, pathOut + nameOut)
 
-    # Fix HDR file for SNAP compatibility
-    fix_envi_hdr_for_snap(pathOut + nameOut + '.hdr')
+    # Fix HDR file for SNAP compatibility (uses parameters defined in main configuration)
+    # Note: snap_wavelength_file and snap_keep_wavelength are passed from main()
+    fix_envi_hdr_for_snap(pathOut + nameOut + '.hdr',
+                          wavelength_file=None,  # Uses computed wavelengths
+                          keep_wavelength=False)  # Default: remove for safety
 
     # Cleanup temporary files
     for f in os.listdir(pathOut):
@@ -414,7 +478,8 @@ def preprocess_radiance(fname, pathToL1Rmetadata, pathToL1Rimages, pathToL1Timag
 
 def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, stepTilt=15,
                            stepWazim=30, demID='USGS/SRTMGL1_003', elevationName='elevation',
-                           topo=True, smartsAlbedoFilePath=None):
+                           topo=True, smartsAlbedoFilePath=None,
+                           snap_wavelength_file=None, snap_keep_wavelength=False):
     """
     Perform atmospheric correction with optional topographic correction
     """
@@ -556,7 +621,9 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
         print('\nSaving the reflectance image (flat surface)...')
         surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
         # Fix HDR file for SNAP compatibility
-        fix_envi_hdr_for_snap(pathToOutImage + '.hdr')
+        fix_envi_hdr_for_snap(pathToOutImage + '.hdr',
+                              wavelength_file=snap_wavelength_file,
+                              keep_wavelength=snap_keep_wavelength)
     else:
         print('\n--- TOPOGRAPHIC CORRECTION ---')
 
@@ -592,7 +659,9 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
         print('\nSaving the reflectance image (with topographic correction)...')
         surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
         # Fix HDR file for SNAP compatibility
-        fix_envi_hdr_for_snap(pathToOutImage + '.hdr')
+        fix_envi_hdr_for_snap(pathToOutImage + '.hdr',
+                              wavelength_file=snap_wavelength_file,
+                              keep_wavelength=snap_keep_wavelength)
 
     # Save masks
     pathOutDir = os.path.dirname(pathToOutImage) + '/'
@@ -789,7 +858,7 @@ def plot_sample_spectra(R, bands, output_path, n_samples=5):
 
     plt.figure(figsize=(12, 6))
 
-    for i, idx in enumerate(sample_indices):
+    for idx in sample_indices:
         row, col = valid_coords[idx]
         spectrum = np.squeeze(R[row, col, :])  # Ensure 1D array
         plt.plot(bands, spectrum, label=f'Pixel ({row}, {col})', alpha=0.7)
@@ -1003,6 +1072,22 @@ if __name__ == '__main__':
     run_postprocessing = True
 
     # ============================================================
+    # SNAP WAVELENGTH COMPATIBILITY OPTIONS
+    # ============================================================
+    # Configure how spectral wavelengths are written to ENVI HDR files
+    # for compatibility with SNAP software
+
+    # Option 1: Load wavelengths from external file (e.g., custom spectral calibration)
+    # Set to None to use wavelengths computed during processing
+    snap_wavelength_file = None
+    # Example: snap_wavelength_file = basePath + 'OUT/EO1H2020342016359110KF_reflectance_spectral_info.txt'
+
+    # Option 2: Keep wavelength field in HDR file
+    # - True: Better for SNAP visualization (wavelength labels show in plots)
+    # - False: Safer for SNAP band math expressions (avoids "Undefined function" errors)
+    snap_keep_wavelength = True  # Try setting to True for better SNAP visualization
+
+    # ============================================================
     # RUN PROCESSING
     # ============================================================
 
@@ -1077,7 +1162,9 @@ if __name__ == '__main__':
             topo=use_topo,
             demID=demID,
             elevationName=elevationName,
-            smartsAlbedoFilePath=os.environ['SMARTSPATH'] + 'Albedo/Albedo.txt'
+            smartsAlbedoFilePath=os.environ['SMARTSPATH'] + 'Albedo/Albedo.txt',
+            snap_wavelength_file=snap_wavelength_file,
+            snap_keep_wavelength=snap_keep_wavelength
         )
 
     # STEP 3: Post-processing (visualization and statistics)
