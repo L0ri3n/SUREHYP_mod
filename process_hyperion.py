@@ -1,6 +1,6 @@
 """
 Hyperion Image Processing Script
-Image: EO1H2020342016359110KF
+Image: EO1H2020342013284110KF
 Processing: L1R/L1T to Surface Reflectance with Topographic Correction
 """
 
