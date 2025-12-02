@@ -893,7 +893,23 @@ def saveRimage(R,metadata,pathOut,scaleFactor=100):
 
     scale=scaleFactor*np.ones(R.shape[2]).astype(int)
     metadata['scale factor']=scale.tolist()
+
+    # Print warning about scale factor for SAM users
+    print('\n' + '='*70)
+    print('IMPORTANT: Reflectance Scale Factor Information')
+    print('='*70)
+    print('Reflectance data is being saved with scale factor = {}'.format(scaleFactor))
+    print('Data range BEFORE scaling: {:.4f} to {:.4f}'.format(np.min(R[R>0]), np.max(R)))
+
     R=R*scaleFactor
+
+    print('Data range AFTER scaling: {:.1f} to {:.1f}'.format(np.min(R[R>0]), np.max(R)))
+    print('')
+    print('NOTE: For Spectral Angle Mapper (SAM), you MUST divide by {} to get 0-1 range:'.format(scaleFactor))
+    print('      cube = cube.astype(np.float32) / {}'.format(scaleFactor))
+    print('      endmembers = endmembers / {}'.format(scaleFactor))
+    print('='*70 + '\n')
+
     R[R>65535]=65535
     R[R<0]=0
     R=R.astype(np.uint16)

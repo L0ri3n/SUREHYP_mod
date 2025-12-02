@@ -462,11 +462,14 @@ def preprocess_radiance(fname, pathToL1Rmetadata, pathToL1Rimages, pathToL1Timag
     surehyp.preprocess.savePreprocessedL1R(arrayL1Rgeoreferenced, wavelengths, fwhms, metadataGeoreferenced,
                                             pathToL1Rimages, pathToL1Rmetadata, metadata, fname, pathOut + nameOut)
 
+    # IMPORTANT: Don't remove wavelength field yet - atmospheric correction needs it!
+    # We'll remove it later for SNAP compatibility after atmospheric correction is done
     # Fix HDR file for SNAP compatibility (uses parameters defined in main configuration)
     # Note: snap_wavelength_file and snap_keep_wavelength are passed from main()
-    fix_envi_hdr_for_snap(pathOut + nameOut + '.hdr',
-                          wavelength_file=None,  # Uses computed wavelengths
-                          keep_wavelength=False)  # Default: remove for safety
+    # fix_envi_hdr_for_snap(pathOut + nameOut + '.hdr',
+    #                       wavelength_file=None,  # Uses computed wavelengths
+    #                       keep_wavelength=False)  # Default: remove for safety
+    print('\nNOTE: Wavelength field kept in preprocessed HDR for atmospheric correction')
 
     # Cleanup temporary files
     for f in os.listdir(pathOut):
@@ -882,6 +885,99 @@ def plot_sample_spectra(R, bands, output_path, n_samples=5):
     print(f'    Sample spectra plot saved to: {output_path}')
 
 
+def plot_mean_reflectance_spectrum(R, bands, output_path):
+    """
+    Plot mean reflectance spectrum across all valid pixels.
+    This helps validate that the spectral shape is correct.
+
+    Parameters:
+    -----------
+    R : numpy.ndarray
+        Reflectance array (rows, cols, bands)
+    bands : numpy.ndarray
+        Wavelengths in nm
+    output_path : str
+        Path to save the plot
+    """
+    import matplotlib.pyplot as plt
+
+    # Get valid pixels (those with any reflectance > 0)
+    valid_mask = np.any(R > 0, axis=2)
+
+    # Compute mean spectrum across all valid pixels
+    mean_spectrum = np.zeros(R.shape[2])
+    std_spectrum = np.zeros(R.shape[2])
+
+    for b in range(R.shape[2]):
+        band_data = R[:, :, b]
+        valid_data = band_data[valid_mask & (band_data > 0)]
+        if len(valid_data) > 0:
+            mean_spectrum[b] = np.mean(valid_data)
+            std_spectrum[b] = np.std(valid_data)
+
+    # Create plot
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+
+    # Plot 1: Mean spectrum with std deviation envelope
+    ax1.plot(bands, mean_spectrum, 'b-', linewidth=2, label='Mean reflectance')
+    ax1.fill_between(bands,
+                      mean_spectrum - std_spectrum,
+                      mean_spectrum + std_spectrum,
+                      alpha=0.3, label='± 1 std dev')
+    ax1.set_xlabel('Wavelength (nm)', fontsize=12)
+    ax1.set_ylabel('Reflectance', fontsize=12)
+    ax1.set_title('Mean Reflectance Spectrum (All Valid Pixels)', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=10)
+    ax1.set_xlim([bands.min(), bands.max()])
+
+    # Highlight key spectral regions
+    ax1.axvspan(680, 700, alpha=0.1, color='red', label='Red edge')
+    ax1.axvspan(850, 900, alpha=0.1, color='darkred', label='NIR plateau')
+    ax1.axvspan(1350, 1450, alpha=0.1, color='cyan', label='Water absorption')
+    ax1.axvspan(1800, 1950, alpha=0.1, color='cyan')
+
+    # Plot 2: Coefficient of variation (CV = std/mean)
+    cv = np.where(mean_spectrum > 0, (std_spectrum / mean_spectrum) * 100, 0)
+    ax2.plot(bands, cv, 'g-', linewidth=1.5)
+    ax2.set_xlabel('Wavelength (nm)', fontsize=12)
+    ax2.set_ylabel('Coefficient of Variation (%)', fontsize=12)
+    ax2.set_title('Spectral Variability Across Scene', fontsize=14, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlim([bands.min(), bands.max()])
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print('    Mean reflectance spectrum saved to: {}'.format(output_path))
+
+    # Print diagnostic information
+    print('')
+    print('    Spectral shape validation:')
+    print('    - Mean reflectance range: {:.4f} to {:.4f}'.format(
+        np.min(mean_spectrum[mean_spectrum > 0]), np.max(mean_spectrum)))
+    print('    - Expected for vegetation: ~0.03-0.05 (blue), ~0.4-0.6 (NIR)')
+
+    # Check for typical vegetation spectrum characteristics
+    if bands.min() < 500 and bands.max() > 850:
+        blue_idx = np.argmin(np.abs(bands - 450))
+        red_idx = np.argmin(np.abs(bands - 670))
+        nir_idx = np.argmin(np.abs(bands - 850))
+
+        print('    - Blue (~450nm): {:.4f}'.format(mean_spectrum[blue_idx]))
+        print('    - Red (~670nm): {:.4f}'.format(mean_spectrum[red_idx]))
+        print('    - NIR (~850nm): {:.4f}'.format(mean_spectrum[nir_idx]))
+
+        # Check for typical vegetation characteristics
+        if mean_spectrum[nir_idx] > mean_spectrum[red_idx] * 2:
+            print('    ✓ Vegetation red-edge signature detected (NIR > Red)')
+        else:
+            print('    ⚠  WARNING: Weak vegetation signature (check if scene has vegetation)')
+
+    return mean_spectrum, std_spectrum
+
+
 def post_processing(R, bands, pathOut, fname):
     """
     Generate post-processing outputs: quicklooks, NDVI, sample spectra.
@@ -900,25 +996,28 @@ def post_processing(R, bands, pathOut, fname):
     import matplotlib.pyplot as plt
 
     print('\n' + '=' * 60)
-    print('STEP 3: POST-PROCESSING & VISUALIZATION')
+    print('STEP 3: POST-PROCESSING & VALIDATION')
     print('=' * 60)
 
     # Create quicklooks directory
     quicklooks_dir = pathOut + 'quicklooks/'
     Path(quicklooks_dir).mkdir(parents=True, exist_ok=True)
 
-    print('\n[1/5] Creating RGB quicklook...')
+    print('\n[1/6] Creating RGB quicklook...')
     create_rgb_quicklook(R, bands, quicklooks_dir + fname + '_RGB.png')
 
-    print('\n[2/5] Creating false color quicklook...')
+    print('\n[2/6] Creating false color quicklook...')
     create_false_color_quicklook(R, bands, quicklooks_dir + fname + '_FalseColor.png')
 
-    print('\n[3/5] Computing NDVI...')
+    print('\n[3/6] Plotting MEAN reflectance spectrum (validation)...')
+    plot_mean_reflectance_spectrum(R, bands, quicklooks_dir + fname + '_mean_spectrum.png')
+
+    print('\n[4/6] Computing NDVI...')
     ndvi = compute_ndvi(R, bands)
 
     # Save NDVI as numpy array
     np.save(pathOut + fname + '_NDVI.npy', ndvi)
-    print(f'    NDVI array saved to: {pathOut + fname}_NDVI.npy')
+    print('    NDVI array saved to: {}_NDVI.npy'.format(pathOut + fname))
 
     # Plot NDVI
     plt.figure(figsize=(10, 10))
@@ -929,42 +1028,48 @@ def post_processing(R, bands, pathOut, fname):
     plt.tight_layout()
     plt.savefig(quicklooks_dir + fname + '_NDVI.png', dpi=150, bbox_inches='tight')
     plt.close()
-    print(f'    NDVI plot saved to: {quicklooks_dir + fname}_NDVI.png')
+    print('    NDVI plot saved to: {}_NDVI.png'.format(quicklooks_dir + fname))
 
-    print('\n[4/5] Plotting sample spectra...')
+    print('\n[5/6] Plotting sample spectra...')
     plot_sample_spectra(R, bands, quicklooks_dir + fname + '_spectra.png')
 
-    print('\n[5/5] Computing statistics...')
+    print('\n[6/6] Computing statistics...')
     # Compute and print statistics
     valid_mask = np.sum(R, axis=2) > 0
     n_valid = np.sum(valid_mask)
     n_total = R.shape[0] * R.shape[1]
 
-    print(f'    Image dimensions: {R.shape[0]} x {R.shape[1]} pixels, {R.shape[2]} bands')
-    print(f'    Valid pixels: {n_valid} / {n_total} ({100*n_valid/n_total:.1f}%)')
-    print(f'    Wavelength range: {bands.min():.1f} - {bands.max():.1f} nm')
+    print('    Image dimensions: {} x {} pixels, {} bands'.format(
+        R.shape[0], R.shape[1], R.shape[2]))
+    print('    Valid pixels: {} / {} ({:.1f}%)'.format(
+        n_valid, n_total, 100*n_valid/n_total))
+    print('    Wavelength range: {:.1f} - {:.1f} nm'.format(
+        bands.min(), bands.max()))
 
     # NDVI statistics
     valid_ndvi = ndvi[valid_mask]
-    print(f'    NDVI range: {valid_ndvi.min():.3f} to {valid_ndvi.max():.3f}')
-    print(f'    NDVI mean: {valid_ndvi.mean():.3f}')
+    print('    NDVI range: {:.3f} to {:.3f}'.format(
+        valid_ndvi.min(), valid_ndvi.max()))
+    print('    NDVI mean: {:.3f}'.format(valid_ndvi.mean()))
 
     # Save statistics to file
     with open(pathOut + fname + '_statistics.txt', 'w') as f:
-        f.write(f'Hyperion Image Processing Statistics\n')
-        f.write(f'=====================================\n\n')
-        f.write(f'Image ID: {fname}\n')
-        f.write(f'Image dimensions: {R.shape[0]} x {R.shape[1]} pixels\n')
-        f.write(f'Number of bands: {R.shape[2]}\n')
-        f.write(f'Wavelength range: {bands.min():.1f} - {bands.max():.1f} nm\n\n')
-        f.write(f'Valid pixels: {n_valid} / {n_total} ({100*n_valid/n_total:.1f}%)\n\n')
-        f.write(f'NDVI Statistics:\n')
-        f.write(f'  Min: {valid_ndvi.min():.3f}\n')
-        f.write(f'  Max: {valid_ndvi.max():.3f}\n')
-        f.write(f'  Mean: {valid_ndvi.mean():.3f}\n')
-        f.write(f'  Std: {valid_ndvi.std():.3f}\n')
+        f.write('Hyperion Image Processing Statistics\n')
+        f.write('=====================================\n\n')
+        f.write('Image ID: {}\n'.format(fname))
+        f.write('Image dimensions: {} x {} pixels\n'.format(R.shape[0], R.shape[1]))
+        f.write('Number of bands: {}\n'.format(R.shape[2]))
+        f.write('Wavelength range: {:.1f} - {:.1f} nm\n\n'.format(
+            bands.min(), bands.max()))
+        f.write('Valid pixels: {} / {} ({:.1f}%)\n\n'.format(
+            n_valid, n_total, 100*n_valid/n_total))
+        f.write('NDVI Statistics:\n')
+        f.write('  Min: {:.3f}\n'.format(valid_ndvi.min()))
+        f.write('  Max: {:.3f}\n'.format(valid_ndvi.max()))
+        f.write('  Mean: {:.3f}\n'.format(valid_ndvi.mean()))
+        f.write('  Std: {:.3f}\n'.format(valid_ndvi.std()))
 
-    print(f'    Statistics saved to: {pathOut + fname}_statistics.txt')
+    print('    Statistics saved to: {}_statistics.txt'.format(pathOut + fname))
 
     print('\n' + '=' * 60)
     print('POST-PROCESSING COMPLETE!')
