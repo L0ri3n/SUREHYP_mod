@@ -1048,7 +1048,7 @@ if __name__ == '__main__':
     # ============================================================
 
     # Hyperion image ID (folder name)
-    fname = 'EO1H2020342016359110KF'
+    fname = 'EO1H2020342013284110KF'
 
     # Output names
     nameOut_radiance = fname + '_preprocessed'
