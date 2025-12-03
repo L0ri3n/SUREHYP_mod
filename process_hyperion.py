@@ -1,6 +1,6 @@
 """
 Hyperion Image Processing Script
-Image: EO1H2020342013284110KF
+Image: EO1H0370412009263110KF
 Processing: L1R/L1T to Surface Reflectance with Topographic Correction
 """
 
@@ -17,6 +17,8 @@ from rasterio.warp import calculate_default_transform, reproject, Resampling
 import subprocess
 import requests
 import time
+import xml.etree.ElementTree as ET
+import glob
 
 import surehyp.preprocess
 import surehyp.atmoCorrection
@@ -186,6 +188,144 @@ def fix_envi_hdr_for_snap(hdr_path, wavelength_file=None, keep_wavelength=False)
             print(f"    Wavelength field removed from HDR to avoid band math issues")
     else:
         print(f"    HDR file already SNAP-compatible: {hdr_path}")
+
+
+def parse_hyperion_xml(xml_path):
+    """
+    Parse Hyperion XML metadata file from USGS EarthExplorer
+
+    Parameters:
+    -----------
+    xml_path : str
+        Path to the XML metadata file
+
+    Returns:
+    --------
+    dict : Dictionary containing all metadata fields
+    """
+    # Parse XML
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+
+    # Define namespace
+    ns = {'eemetadata': 'http://earthexplorer.usgs.gov/eemetadata.xsd'}
+
+    # Extract metadata fields
+    metadata = {}
+    for field in root.findall('.//eemetadata:metadataField', ns):
+        field_name = field.get('name')
+        field_value = field.find('eemetadata:metadataValue', ns).text
+        metadata[field_name] = field_value
+
+    return metadata
+
+
+def convert_time_format(time_str):
+    """
+    Convert time from HH:MM:SS.SSS to HH:MM:SS format
+    Example: 2013:284:10:09:05.020 → 2013:284:10:09:05
+    """
+    if ':' in time_str:
+        parts = time_str.split(':')
+        if len(parts) >= 4:
+            # Remove milliseconds from seconds
+            seconds = parts[3].split('.')[0]
+            return "{0}:{1}:{2}:{3}".format(parts[0], parts[1], parts[2], seconds)
+    return time_str
+
+
+def create_metadata_csv(xml_path, output_csv_path, append=True):
+    """
+    Create or append to metadata CSV file from XML
+
+    Parameters:
+    -----------
+    xml_path : str
+        Path to the XML metadata file
+    output_csv_path : str
+        Path for the output CSV file
+    append : bool
+        If True, append to existing CSV. If False, create new CSV.
+    """
+    # Parse XML
+    metadata = parse_hyperion_xml(xml_path)
+
+    # Extract Scene ID from Entity ID (remove _SG1_01 suffix)
+    entity_id = metadata['Entity ID']
+    scene_id = entity_id[:-7] if entity_id.endswith('_SG1_01') else entity_id
+
+    # Create DataFrame with required columns (matching SUREHYP expectations)
+    df_new = pd.DataFrame({
+        'Entity ID': [metadata['Entity ID']],
+        'Scene ID': [scene_id],
+        'Acquisition Date': [metadata['Acquisition Date']],
+        'Cloud Cover': [int(metadata['Cloud Cover'])],
+        'Orbit Path': [int(metadata['Orbit Path'])],
+        'Orbit Row': [int(metadata['Orbit Row'])],
+        'Target Path': [int(metadata['Target Path'])],
+        'Target Row': [int(metadata['Target Row'])],
+        'Station': [metadata['Station']],
+        'Processing Level': [metadata['Processing Level']],
+        'Scene Start Time': [convert_time_format(metadata['Scene Start Time'])],
+        'Start Time': [metadata['Scene Start Time'].split(':')[-1].split('.')[0] if ':' in metadata['Scene Start Time'] else 'N/A'],
+        'Scene Stop Time': [convert_time_format(metadata['Scene Stop Time'])],
+        'Stop Time': [metadata['Scene Stop Time'].split(':')[-1].split('.')[0] if ':' in metadata['Scene Stop Time'] else 'N/A'],
+        'Sun Azimuth': [float(metadata['Sun Azimuth'])],
+        'Sun Elevation': [float(metadata['Sun Elevation'])],
+        'Satellite Inclination': [float(metadata['Satellite Inclination'])],
+        'Look Angle': [float(metadata['Look Angle'])],
+        'Date Entered': [metadata['Date Entered']],
+        'Center Latitude': [metadata['Center Latitude']],
+        'Center Longitude': [metadata['Center Longitude']],
+        'Center Latitude dec': [float(metadata['Center Latitude dec'])],
+        'Center Longtude dec': [float(metadata['Center Longtude dec'])],  # Note: typo 'Longtude' matches SUREHYP
+        'NW Corner Lat': [metadata['NW Corner Lat']],
+        'NW Corner Long': [metadata['NW Corner Long']],
+        'NE Corner Lat': [metadata['NE Corner Lat']],
+        'NE Corner Long': [metadata['NE Corner Long']],
+        'SE Corner Lat': [metadata['SE Corner Lat']],
+        'SE Corner Long': [metadata['SE Corner Long']],
+        'SW Corner Lat': [metadata['SW Corner Lat']],
+        'SW Corner Long': [metadata['SW Corner Long']],
+        'NW Corner Lat dec': [float(metadata['NW Corner Lat dec'])],
+        'NW Corner Long dec': [float(metadata['NW Corner Long dec'])],
+        'NE Corner Lat dec': [float(metadata['NE Corner Lat dec'])],
+        'NE Corner Long dec': [float(metadata['NE Corner Long dec'])],
+        'SE Corner Lat dec': [float(metadata['SE Corner Lat dec'])],
+        'SE Corner Long dec': [float(metadata['SE Corner Long dec'])],
+        'SW Corner Lat dec': [float(metadata['SW Corner Lat dec'])],
+        'SW Corner Long dec': [float(metadata['SW Corner Long dec'])],
+        'Satellite Azimuth': [float(metadata.get('Satellite Azimuth', 0.0))]  # Not always in XML
+    })
+
+    # Append or create new CSV
+    if append and os.path.exists(output_csv_path):
+        # Read existing CSV
+        df_existing = pd.read_csv(output_csv_path)
+
+        # Check if this Entity ID already exists
+        if entity_id in df_existing['Entity ID'].values:
+            print("    Warning: {} already exists in metadata CSV".format(entity_id))
+            print("    Skipping to avoid duplicates.")
+            return
+
+        # Append new row
+        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+        df_combined.to_csv(output_csv_path, index=False)
+        print("    Appended {} to {}".format(entity_id, output_csv_path))
+    else:
+        # Create new CSV
+        df_new.to_csv(output_csv_path, index=False)
+        print("    Created new CSV: {}".format(output_csv_path))
+
+    # Print summary
+    print("\n    Metadata Summary for {}:".format(scene_id))
+    print("      Acquisition Date: {}".format(metadata['Acquisition Date']))
+    print("      Sun Elevation: {}°".format(metadata['Sun Elevation']))
+    print("      Sun Azimuth: {}°".format(metadata['Sun Azimuth']))
+    print("      Look Angle: {}°".format(metadata['Look Angle']))
+    print("      Center Coordinates: ({}, {})".format(metadata['Center Latitude dec'], metadata['Center Longtude dec']))
+    print("      Cloud Cover: {}%".format(metadata['Cloud Cover']))
 
 
 def getGEEdem_fixed(UL_lat, UL_lon, UR_lat, UR_lon, LL_lat, LL_lon, LR_lat, LR_lon,
@@ -493,7 +633,67 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
     print('=' * 60)
 
     print('\n[1/12] Open processed radiance image')
-    L, bands, fwhms, processing_metadata, metadata = surehyp.atmoCorrection.getImageAndParameters(pathToRadianceImage)
+
+    # Try to load the image with surehyp's function
+    try:
+        L, bands, fwhms, processing_metadata, metadata = surehyp.atmoCorrection.getImageAndParameters(pathToRadianceImage)
+    except KeyError as e:
+        if 'wavelength' in str(e):
+            # If wavelength is missing from HDR, load it from the spectral info file
+            print('    Wavelength field not found in HDR, loading from spectral info file...')
+
+            # Determine HDR path
+            hdr_path = pathToRadianceImage + '.hdr'
+
+            # Load spectral info file
+            spectral_info_path = pathToRadianceImage + '_spectral_info.txt'
+            if os.path.exists(spectral_info_path):
+                wavelengths = []
+                fwhms_list = []
+                with open(spectral_info_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('#') or not line.strip():
+                            continue
+                        parts = line.strip().split(',')
+                        if len(parts) >= 2:
+                            wavelengths.append(float(parts[1].strip()))
+                        if len(parts) >= 3 and parts[2].strip() != 'N/A':
+                            fwhms_list.append(float(parts[2].strip()))
+
+                # Temporarily restore wavelength to HDR for compatibility with surehyp
+                with open(hdr_path, 'r') as f:
+                    hdr_content = f.read()
+
+                # Add wavelength field
+                wavelength_str = ' , '.join(str(w) for w in wavelengths)
+                if 'band names' in hdr_content.lower():
+                    hdr_content = re.sub(r'(band names\s*=\s*\{[^}]*\})',
+                                        f'\\1\nwavelength = {{ {wavelength_str} }}',
+                                        hdr_content, flags=re.IGNORECASE)
+                else:
+                    hdr_content = re.sub(r'(bands\s*=\s*\d+)',
+                                        f'\\1\nwavelength = {{ {wavelength_str} }}',
+                                        hdr_content)
+
+                # Add FWHM field if available
+                if fwhms_list:
+                    fwhm_str = ' , '.join(str(f) for f in fwhms_list)
+                    hdr_content = re.sub(r'(wavelength\s*=\s*\{[^}]*\})',
+                                        f'\\1\nfwhm = {{ {fwhm_str} }}',
+                                        hdr_content, flags=re.IGNORECASE)
+
+                # Write back temporarily
+                with open(hdr_path, 'w') as f:
+                    f.write(hdr_content)
+
+                print(f'    Restored wavelengths from: {spectral_info_path}')
+
+                # Now try loading again
+                L, bands, fwhms, processing_metadata, metadata = surehyp.atmoCorrection.getImageAndParameters(pathToRadianceImage)
+            else:
+                raise ValueError(f"Wavelength field missing from HDR and spectral info file not found: {spectral_info_path}")
+        else:
+            raise
 
     # Extract metadata for clearer visualization
     longit = processing_metadata['longit']
@@ -646,6 +846,106 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
         rho_background = f(df['Wvlgth'] * 1E-3)
 
         print('\nComputing LUT for rough terrain correction')
+
+        # Check and clip terrain parameters to ensure they're within LUT bounds
+        # The LUT is built with ranges: altit ± stepAltit, tilt: 0 to ~90, wazim: 0 to 360
+        elev_km = elev / 1000.0  # Convert elevation from meters to km
+
+        # Calculate LUT bounds based on scene average altitude and step sizes
+        altit_min = max(0, altit - stepAltit)
+        altit_max = altit + stepAltit
+
+        # Check for NaN values and handle them
+        elev_has_nan = np.isnan(elev_km).any()
+        slope_has_nan = np.isnan(slope).any()
+        wazim_has_nan = np.isnan(wazim).any()
+
+        if elev_has_nan or slope_has_nan or wazim_has_nan:
+            print(f'    WARNING: DEM data contains NaN values!')
+            print(f'    Elevation NaN: {np.isnan(elev_km).sum()} pixels')
+            print(f'    Slope NaN: {np.isnan(slope).sum()} pixels')
+            print(f'    Aspect NaN: {np.isnan(wazim).sum()} pixels')
+            print(f'    These are likely ocean/water pixels where DEM has no data')
+            print(f'    Filling NaN values with sea level (0m) and flat terrain...')
+
+            # Create DEM visualization before filling NaN values
+            import matplotlib.pyplot as plt
+
+            # Save DEM visualization
+            dem_vis_path = os.path.dirname(pathToOutImage) + '/elev/'
+            Path(dem_vis_path).mkdir(parents=True, exist_ok=True)
+
+            # Create figure with subplots
+            fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+
+            # 1. Elevation map
+            im1 = axes[0, 0].imshow(elev_km * 1000, cmap='terrain', vmin=0, vmax=np.nanmax(elev_km)*1000)
+            axes[0, 0].set_title('Elevation (m above sea level)')
+            axes[0, 0].axis('off')
+            plt.colorbar(im1, ax=axes[0, 0], label='Elevation (m)', shrink=0.8)
+
+            # 2. Elevation with NaN highlighted
+            elev_display = elev_km.copy()
+            elev_display[np.isnan(elev_display)] = -999  # Mark NaN as distinct value
+            im2 = axes[0, 1].imshow(elev_display * 1000, cmap='terrain', vmin=-999, vmax=np.nanmax(elev_km)*1000)
+            axes[0, 1].set_title('Elevation (NaN shown in blue/purple)')
+            axes[0, 1].axis('off')
+            plt.colorbar(im2, ax=axes[0, 1], label='Elevation (m)', shrink=0.8)
+
+            # 3. Slope map
+            im3 = axes[1, 0].imshow(slope, cmap='hot', vmin=0, vmax=90)
+            axes[1, 0].set_title('Slope (degrees)')
+            axes[1, 0].axis('off')
+            plt.colorbar(im3, ax=axes[1, 0], label='Slope (°)', shrink=0.8)
+
+            # 4. Aspect map
+            im4 = axes[1, 1].imshow(wazim, cmap='hsv', vmin=0, vmax=360)
+            axes[1, 1].set_title('Aspect (degrees from North)')
+            axes[1, 1].axis('off')
+            plt.colorbar(im4, ax=axes[1, 1], label='Aspect (°)', shrink=0.8)
+
+            plt.tight_layout()
+            dem_vis_file = dem_vis_path + 'DEM_visualization.png'
+            plt.savefig(dem_vis_file, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f'    DEM visualization saved to: {dem_vis_file}')
+
+            # Fill NaN values with sea level and flat terrain
+            # (appropriate for ocean/water pixels)
+            if elev_has_nan:
+                elev_km = np.nan_to_num(elev_km, nan=0.0)  # Sea level (0m)
+            if slope_has_nan:
+                slope = np.nan_to_num(slope, nan=0.0)  # Flat terrain
+            if wazim_has_nan:
+                wazim = np.nan_to_num(wazim, nan=0.0)  # North-facing
+
+        # Print DEM statistics (using nanmin/nanmax to handle any remaining NaNs)
+        print(f'    DEM elevation range: {np.nanmin(elev_km):.3f} to {np.nanmax(elev_km):.3f} km')
+        print(f'    LUT altitude bounds: {altit_min:.3f} to {altit_max:.3f} km')
+        print(f'    Slope range: {np.nanmin(slope):.1f}° to {np.nanmax(slope):.1f}°')
+        print(f'    Aspect range: {np.nanmin(wazim):.1f}° to {np.nanmax(wazim):.1f}°')
+
+        # Always clip to ensure values are within LUT bounds
+        if np.nanmin(elev_km) < altit_min or np.nanmax(elev_km) > altit_max:
+            print(f'    WARNING: Clipping elevation to LUT bounds...')
+        elev_km = np.clip(elev_km, altit_min, altit_max)
+        elev = elev_km * 1000.0  # Convert back to meters
+
+        # Slope should be 0 to ~90 degrees
+        tilt_max = 90
+        if np.nanmin(slope) < 0 or np.nanmax(slope) > tilt_max:
+            print(f'    WARNING: Clipping slope to 0-{tilt_max}°...')
+        slope = np.clip(slope, 0, tilt_max)
+
+        # Aspect (wazim) should be 0 to 360 degrees
+        wazim = np.mod(wazim, 360)  # Normalize to 0-360
+        # Handle any NaN that might result from mod operation
+        wazim = np.nan_to_num(wazim, nan=0.0)
+
+        print(f'    After processing - Elevation: {np.min(elev_km):.3f} to {np.max(elev_km):.3f} km')
+        print(f'    After processing - Slope: {np.min(slope):.1f}° to {np.max(slope):.1f}°')
+        print(f'    After processing - Aspect: {np.min(wazim):.1f}° to {np.max(wazim):.1f}°')
+
         R = surehyp.atmoCorrection.getDemReflectance(altitMap=elev, tiltMap=slope, wazimMap=wazim,
                                                       stepAltit=stepAltit, stepTilt=stepTilt,
                                                       stepWazim=stepWazim, latit=latit,
@@ -1048,7 +1348,7 @@ if __name__ == '__main__':
     # ============================================================
 
     # Hyperion image ID (folder name)
-    fname = 'EO1H2020342013284110KF'
+    fname = 'EO1H0370412009266110PF'
 
     # Output names
     nameOut_radiance = fname + '_preprocessed'
@@ -1093,6 +1393,37 @@ if __name__ == '__main__':
     snap_keep_wavelength = True  # Set to True to include wavelengths in HDR for SNAP
 
     # ============================================================
+    # METADATA XML CONFIGURATION (OPTIONAL)
+    # ============================================================
+    # Automatically find XML metadata file from fname
+    # The script searches for any file matching: eo1_hyp_pub_{fname}_*.xml
+    # This handles all USGS naming variations (SG1_01, SGS_01, etc.)
+    #
+    # To download XML metadata:
+    # 1. Go to https://earthexplorer.usgs.gov/
+    # 2. Find your image (e.g., EO1H0370412009263110KF)
+    # 3. Click 'Metadata' → 'Export Metadata'
+    # 4. Save in METADATA folder (naming is automatic from USGS)
+    #
+    # Set process_xml_metadata to False to skip metadata conversion
+    process_xml_metadata = True  # Set to False to skip XML metadata conversion
+
+    # Find XML file automatically using glob pattern
+    if process_xml_metadata:
+        xml_pattern = basePath + 'METADATA/eo1_hyp_pub_' + fname + '_*.xml'
+        matching_files = glob.glob(xml_pattern)
+
+        if matching_files:
+            xml_metadata_path = matching_files[0]  # Use first match
+            if len(matching_files) > 1:
+                print(f'    Note: Found {len(matching_files)} XML files for {fname}, using: {os.path.basename(xml_metadata_path)}')
+        else:
+            # No file found - set to expected pattern for error message
+            xml_metadata_path = basePath + 'METADATA/eo1_hyp_pub_' + fname + '_*.xml'
+    else:
+        xml_metadata_path = None
+
+    # ============================================================
     # RUN PROCESSING
     # ============================================================
 
@@ -1100,6 +1431,33 @@ if __name__ == '__main__':
     print('HYPERION IMAGE PROCESSING')
     print(f'Image ID: {fname}')
     print('=' * 60)
+
+    # STEP 0 (Optional): Convert XML metadata to CSV
+    if xml_metadata_path is not None:
+        print('\n' + '=' * 60)
+        print('STEP 0: METADATA CONVERSION (XML TO CSV)')
+        print('=' * 60)
+
+        if os.path.exists(xml_metadata_path):
+            print(f'\nInput XML: {xml_metadata_path}')
+            print(f'Output CSV: {pathToL1Rmetadata}')
+
+            try:
+                create_metadata_csv(xml_metadata_path, pathToL1Rmetadata, append=True)
+                print('\n' + '=' * 60)
+                print('METADATA CONVERSION COMPLETE!')
+                print('=' * 60)
+            except Exception as e:
+                print(f'\nWarning: Metadata conversion failed: {e}')
+                print('Continuing with image processing...')
+        else:
+            print(f'\nWarning: XML metadata file not found: {xml_metadata_path}')
+            print('Skipping metadata conversion...')
+            print('\nTo download XML metadata:')
+            print('1. Go to https://earthexplorer.usgs.gov/')
+            print(f'2. Find your image ({fname})')
+            print('3. Click "Metadata" → "Export Metadata"')
+            print('4. Save and update xml_metadata_path in this script')
 
     # STEP 1: Preprocess radiance
     # Check if preprocessed file already exists
