@@ -1182,6 +1182,186 @@ def plot_sample_spectra(R, bands, output_path, n_samples=5):
     print(f'    Sample spectra plot saved to: {output_path}')
 
 
+def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus_mask=None):
+    """
+    Visualize the spatial distribution of valid pixels used in final statistics.
+
+    Parameters:
+    -----------
+    R : numpy.ndarray
+        Reflectance array (rows, cols, bands)
+    bands : numpy.ndarray
+        Wavelengths in nm
+    pathOut : str
+        Output directory
+    fname : str
+        Base filename for outputs
+    clearview_mask : numpy.ndarray, optional
+        Clear view mask (1 = clear, 0 = cloud/shadow)
+    cirrus_mask : numpy.ndarray, optional
+        Cirrus cloud mask (1 = cirrus, 0 = clear)
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    # Create quicklooks directory
+    quicklooks_dir = pathOut + 'quicklooks/'
+    Path(quicklooks_dir).mkdir(parents=True, exist_ok=True)
+
+    # Define valid pixels based on reflectance data
+    valid_reflectance = np.sum(R, axis=2) > 0
+
+    # Create a classification map
+    # 0 = Invalid/No data, 1 = Valid clear, 2 = Cirrus affected, 3 = Cloud/shadow
+    pixel_class = np.zeros(R.shape[:2], dtype=np.uint8)
+
+    # Mark all valid reflectance pixels
+    pixel_class[valid_reflectance] = 1
+
+    # If masks are provided, refine the classification
+    if cirrus_mask is not None:
+        pixel_class[(valid_reflectance) & (cirrus_mask == 1)] = 2
+
+    if clearview_mask is not None:
+        pixel_class[(valid_reflectance) & (clearview_mask == 0)] = 3
+
+    # Count pixels in each category
+    n_total = R.shape[0] * R.shape[1]
+    n_invalid = np.sum(pixel_class == 0)
+    n_valid_clear = np.sum(pixel_class == 1)
+    n_cirrus = np.sum(pixel_class == 2)
+    n_cloud = np.sum(pixel_class == 3)
+
+    # Create figure with two subplots
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    # Define colors for each class
+    # 0=black (invalid), 1=green (valid), 2=yellow (cirrus), 3=red (cloud/shadow)
+    colors = ['black', 'green', 'yellow', 'red']
+    cmap = plt.matplotlib.colors.ListedColormap(colors)
+
+    # Plot 1: Valid pixel distribution
+    im = axes[0].imshow(pixel_class, cmap=cmap, vmin=0, vmax=3, interpolation='nearest')
+    axes[0].set_title('Valid Pixel Distribution', fontsize=14, fontweight='bold')
+    axes[0].axis('off')
+
+    # Create custom legend
+    legend_elements = [
+        Patch(facecolor='black', label=f'No Data: {n_invalid} ({100*n_invalid/n_total:.1f}%)'),
+        Patch(facecolor='green', label=f'Valid Clear: {n_valid_clear} ({100*n_valid_clear/n_total:.1f}%)'),
+    ]
+    if n_cirrus > 0:
+        legend_elements.append(
+            Patch(facecolor='yellow', label=f'Cirrus Affected: {n_cirrus} ({100*n_cirrus/n_total:.1f}%)')
+        )
+    if n_cloud > 0:
+        legend_elements.append(
+            Patch(facecolor='red', label=f'Cloud/Shadow: {n_cloud} ({100*n_cloud/n_total:.1f}%)')
+        )
+
+    axes[0].legend(handles=legend_elements, loc='upper right', fontsize=10)
+
+    # Plot 2: Valid pixel density (smoothed view)
+    from scipy.ndimage import gaussian_filter
+    valid_density = gaussian_filter(valid_reflectance.astype(float), sigma=2)
+
+    im2 = axes[1].imshow(valid_density, cmap='RdYlGn', vmin=0, vmax=1)
+    axes[1].set_title('Valid Pixel Density (Smoothed)', fontsize=14, fontweight='bold')
+    axes[1].axis('off')
+    plt.colorbar(im2, ax=axes[1], label='Density', shrink=0.8)
+
+    plt.tight_layout()
+
+    # Save figure
+    output_path = quicklooks_dir + fname + '_valid_pixels.png'
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f'    Valid pixel visualization saved to: {output_path}')
+
+    # Create detailed statistics plot
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Plot 1: Histogram of valid pixel counts per row
+    valid_per_row = np.sum(valid_reflectance, axis=1)
+    axes[0, 0].bar(range(len(valid_per_row)), valid_per_row, color='steelblue')
+    axes[0, 0].set_xlabel('Row Index')
+    axes[0, 0].set_ylabel('Valid Pixels per Row')
+    axes[0, 0].set_title('Valid Pixel Distribution by Row')
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # Plot 2: Histogram of valid pixel counts per column
+    valid_per_col = np.sum(valid_reflectance, axis=0)
+    axes[0, 1].bar(range(len(valid_per_col)), valid_per_col, color='coral')
+    axes[0, 1].set_xlabel('Column Index')
+    axes[0, 1].set_ylabel('Valid Pixels per Column')
+    axes[0, 1].set_title('Valid Pixel Distribution by Column')
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # Plot 3: Mean reflectance at 850nm for valid pixels
+    nir_idx = np.argmin(np.abs(bands - 850))
+    nir_band = R[:, :, nir_idx].copy()
+    nir_band[~valid_reflectance] = np.nan
+
+    im3 = axes[1, 0].imshow(nir_band, cmap='viridis')
+    axes[1, 0].set_title(f'NIR Reflectance (~850nm) - Valid Pixels Only')
+    axes[1, 0].axis('off')
+    plt.colorbar(im3, ax=axes[1, 0], label='Reflectance', shrink=0.8)
+
+    # Plot 4: Pie chart of pixel categories
+    categories = []
+    sizes = []
+    colors_pie = []
+
+    if n_invalid > 0:
+        categories.append(f'No Data\n{n_invalid} px')
+        sizes.append(n_invalid)
+        colors_pie.append('black')
+    if n_valid_clear > 0:
+        categories.append(f'Valid Clear\n{n_valid_clear} px')
+        sizes.append(n_valid_clear)
+        colors_pie.append('green')
+    if n_cirrus > 0:
+        categories.append(f'Cirrus\n{n_cirrus} px')
+        sizes.append(n_cirrus)
+        colors_pie.append('yellow')
+    if n_cloud > 0:
+        categories.append(f'Cloud/Shadow\n{n_cloud} px')
+        sizes.append(n_cloud)
+        colors_pie.append('red')
+
+    axes[1, 1].pie(sizes, labels=categories, colors=colors_pie, autopct='%1.1f%%',
+                    startangle=90, textprops={'fontsize': 10})
+    axes[1, 1].set_title('Pixel Category Distribution')
+
+    plt.tight_layout()
+
+    # Save detailed statistics
+    output_path_detail = quicklooks_dir + fname + '_valid_pixels_stats.png'
+    plt.savefig(output_path_detail, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f'    Valid pixel statistics saved to: {output_path_detail}')
+
+    # Save valid pixel mask as numpy array for future use
+    valid_mask_path = pathOut + fname + '_valid_pixels_mask.npy'
+    np.save(valid_mask_path, valid_reflectance)
+    print(f'    Valid pixel mask saved to: {valid_mask_path}')
+
+    # Return statistics dictionary
+    stats = {
+        'n_total': n_total,
+        'n_invalid': n_invalid,
+        'n_valid_clear': n_valid_clear,
+        'n_cirrus': n_cirrus,
+        'n_cloud': n_cloud,
+        'valid_per_row': valid_per_row,
+        'valid_per_col': valid_per_col
+    }
+
+    return stats, valid_reflectance
+
+
 def post_processing(R, bands, pathOut, fname):
     """
     Generate post-processing outputs: quicklooks, NDVI, sample spectra.
@@ -1207,13 +1387,13 @@ def post_processing(R, bands, pathOut, fname):
     quicklooks_dir = pathOut + 'quicklooks/'
     Path(quicklooks_dir).mkdir(parents=True, exist_ok=True)
 
-    print('\n[1/5] Creating RGB quicklook...')
+    print('\n[1/7] Creating RGB quicklook...')
     create_rgb_quicklook(R, bands, quicklooks_dir + fname + '_RGB.png')
 
-    print('\n[2/5] Creating false color quicklook...')
+    print('\n[2/7] Creating false color quicklook...')
     create_false_color_quicklook(R, bands, quicklooks_dir + fname + '_FalseColor.png')
 
-    print('\n[3/5] Computing NDVI...')
+    print('\n[3/7] Computing NDVI...')
     ndvi = compute_ndvi(R, bands)
 
     # Save NDVI as numpy array
@@ -1231,14 +1411,32 @@ def post_processing(R, bands, pathOut, fname):
     plt.close()
     print(f'    NDVI plot saved to: {quicklooks_dir + fname}_NDVI.png')
 
-    print('\n[4/5] Plotting sample spectra...')
+    print('\n[4/7] Plotting sample spectra...')
     plot_sample_spectra(R, bands, quicklooks_dir + fname + '_spectra.png')
 
-    print('\n[5/5] Computing statistics...')
+    print('\n[5/7] Visualizing valid pixel distribution...')
+    # Load masks if available
+    clearview_mask = None
+    cirrus_mask = None
+
+    clearview_mask_path = pathOut + fname + '_reflectance_clearview_mask.npy'
+    cirrus_mask_path = pathOut + fname + '_reflectance_cirrus_mask.npy'
+
+    if os.path.exists(clearview_mask_path):
+        clearview_mask = np.load(clearview_mask_path)
+        print(f'    Loaded clearview mask from: {clearview_mask_path}')
+
+    if os.path.exists(cirrus_mask_path):
+        cirrus_mask = np.load(cirrus_mask_path)
+        print(f'    Loaded cirrus mask from: {cirrus_mask_path}')
+
+    valid_stats, valid_mask = visualize_valid_pixels(R, bands, pathOut, fname,
+                                                      clearview_mask, cirrus_mask)
+
+    print('\n[6/7] Computing statistics...')
     # Compute and print statistics
-    valid_mask = np.sum(R, axis=2) > 0
-    n_valid = np.sum(valid_mask)
-    n_total = R.shape[0] * R.shape[1]
+    n_valid = valid_stats['n_valid_clear']
+    n_total = valid_stats['n_total']
 
     print(f'    Image dimensions: {R.shape[0]} x {R.shape[1]} pixels, {R.shape[2]} bands')
     print(f'    Valid pixels: {n_valid} / {n_total} ({100*n_valid/n_total:.1f}%)')
@@ -1249,6 +1447,7 @@ def post_processing(R, bands, pathOut, fname):
     print(f'    NDVI range: {valid_ndvi.min():.3f} to {valid_ndvi.max():.3f}')
     print(f'    NDVI mean: {valid_ndvi.mean():.3f}')
 
+    print('\n[7/7] Saving comprehensive statistics...')
     # Save statistics to file
     with open(pathOut + fname + '_statistics.txt', 'w') as f:
         f.write(f'Hyperion Image Processing Statistics\n')
@@ -1257,8 +1456,16 @@ def post_processing(R, bands, pathOut, fname):
         f.write(f'Image dimensions: {R.shape[0]} x {R.shape[1]} pixels\n')
         f.write(f'Number of bands: {R.shape[2]}\n')
         f.write(f'Wavelength range: {bands.min():.1f} - {bands.max():.1f} nm\n\n')
-        f.write(f'Valid pixels: {n_valid} / {n_total} ({100*n_valid/n_total:.1f}%)\n\n')
-        f.write(f'NDVI Statistics:\n')
+        f.write(f'Pixel Classification:\n')
+        f.write(f'  Total pixels: {n_total}\n')
+        f.write(f'  Valid clear pixels: {valid_stats["n_valid_clear"]} ({100*valid_stats["n_valid_clear"]/n_total:.1f}%)\n')
+        f.write(f'  Invalid/No data pixels: {valid_stats["n_invalid"]} ({100*valid_stats["n_invalid"]/n_total:.1f}%)\n')
+        if valid_stats["n_cirrus"] > 0:
+            f.write(f'  Cirrus affected pixels: {valid_stats["n_cirrus"]} ({100*valid_stats["n_cirrus"]/n_total:.1f}%)\n')
+        if valid_stats["n_cloud"] > 0:
+            f.write(f'  Cloud/shadow pixels: {valid_stats["n_cloud"]} ({100*valid_stats["n_cloud"]/n_total:.1f}%)\n')
+        f.write(f'\n')
+        f.write(f'NDVI Statistics (valid pixels only):\n')
         f.write(f'  Min: {valid_ndvi.min():.3f}\n')
         f.write(f'  Max: {valid_ndvi.max():.3f}\n')
         f.write(f'  Mean: {valid_ndvi.mean():.3f}\n')
