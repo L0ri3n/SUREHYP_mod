@@ -24,6 +24,14 @@ import surehyp.preprocess
 import surehyp.atmoCorrection
 import re
 
+# Import DEM fallback module for robust DEM acquisition
+try:
+    from dem_fallback import downloadDEMfromGEE_robust, apply_flat_terrain_assumption
+    DEM_FALLBACK_AVAILABLE = True
+except ImportError:
+    print("Warning: dem_fallback module not found. Using basic DEM download only.")
+    DEM_FALLBACK_AVAILABLE = False
+
 
 def fix_envi_hdr_for_snap(hdr_path, wavelength_file=None, keep_wavelength=False):
     """
@@ -624,9 +632,44 @@ def preprocess_radiance(fname, pathToL1Rmetadata, pathToL1Rimages, pathToL1Timag
 def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, stepTilt=15,
                            stepWazim=30, demID='USGS/SRTMGL1_003', elevationName='elevation',
                            topo=True, smartsAlbedoFilePath=None,
-                           snap_wavelength_file=None, snap_keep_wavelength=False):
+                           snap_wavelength_file=None, snap_keep_wavelength=False,
+                           local_dem_path=None, fallback_dems=None,
+                           use_flat_terrain_on_failure=True):
     """
-    Perform atmospheric correction with optional topographic correction
+    Perform atmospheric correction with optional topographic correction.
+
+    Enhanced with multi-level DEM fallback strategy for robust processing.
+
+    Parameters:
+    -----------
+    pathToRadianceImage : str
+        Path to preprocessed radiance image
+    pathToOutImage : str
+        Output path for reflectance image
+    stepAltit : float
+        Altitude step for LUT (km)
+    stepTilt : float
+        Slope step for LUT (degrees)
+    stepWazim : float
+        Aspect step for LUT (degrees)
+    demID : str
+        Primary GEE DEM source
+    elevationName : str
+        Band name for elevation
+    topo : bool
+        Enable topographic correction
+    smartsAlbedoFilePath : str, optional
+        Path to SMARTS albedo file
+    snap_wavelength_file : str, optional
+        External wavelength file for SNAP
+    snap_keep_wavelength : bool
+        Keep wavelength in HDR
+    local_dem_path : str, optional
+        Path to local DEM file as fallback
+    fallback_dems : list, optional
+        List of alternative GEE DEM sources
+    use_flat_terrain_on_failure : bool
+        Use flat terrain assumption if all DEM sources fail
     """
     print('\n' + '=' * 60)
     print('STEP 2: ATMOSPHERIC CORRECTION')
@@ -726,41 +769,109 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
     wazim = None
 
     if topo:
-        print('\n[2/12] Download DEM images from GEE')
+        print('\n[2/12] Download DEM images from GEE (with fallback support)')
+
+        dem_acquisition_success = False
+        use_flat_dem = False
+
         try:
             # Set output path for DEM in the OUT folder
             dem_output_path = os.path.dirname(pathToOutImage) + '/elev/'
 
-            # Try using our fixed download function
-            path_to_dem = downloadDEMfromGEE(UL_lon, UL_lat, UR_lon, UR_lat,
-                                              LR_lon, LR_lat, LL_lon, LL_lat,
-                                              demID=demID, elevationName=elevationName,
-                                              output_path=dem_output_path)
+            # Try enhanced DEM download with fallback strategy
+            if DEM_FALLBACK_AVAILABLE:
+                print('    Using enhanced DEM fallback system...')
+                try:
+                    path_to_dem = downloadDEMfromGEE_robust(
+                        UL_lon, UL_lat, UR_lon, UR_lat,
+                        LR_lon, LR_lat, LL_lon, LL_lat,
+                        demID=demID,
+                        elevationName=elevationName,
+                        output_path=dem_output_path,
+                        fallback_dems=fallback_dems,
+                        local_dem_path=local_dem_path
+                    )
+                    dem_acquisition_success = True
+                except ValueError as e:
+                    # All DEM sources failed
+                    print(f'\n{str(e)}')
 
-            print('\n[3/12] Reproject DEM images')
-            # reprojectDEM expects a file path, not a folder
-            dem_file_path = os.path.join(path_to_dem, 'elev.tif')
-            reprojected_dem_path = os.path.join(path_to_dem, 'elev_reprojected.tif')
-            path_to_reprojected_dem = surehyp.atmoCorrection.reprojectDEM(
-                pathToRadianceImage,
-                path_elev=dem_file_path,
-                path_elev_out=reprojected_dem_path
-            )
+                    if use_flat_terrain_on_failure:
+                        print('\n    Applying flat terrain assumption as final fallback...')
+                        # We'll create flat terrain after loading image dimensions
+                        use_flat_dem = True
+                    else:
+                        raise
+            else:
+                # Fallback not available, use original function
+                print('    Using basic DEM download (no fallback)...')
+                path_to_dem = downloadDEMfromGEE(UL_lon, UL_lat, UR_lon, UR_lat,
+                                                  LR_lon, LR_lat, LL_lon, LL_lat,
+                                                  demID=demID, elevationName=elevationName,
+                                                  output_path=dem_output_path)
+                dem_acquisition_success = True
 
-            print('\n[4/12] Resampling DEM')
-            resampled_dem_path = os.path.join(dem_output_path, 'elev_resampled.tif')
-            path_elev = surehyp.atmoCorrection.matchResolution(
-                pathToRadianceImage,
-                path_elev=path_to_reprojected_dem,
-                path_out=resampled_dem_path
-            )
+            # Process DEM if successfully acquired
+            if dem_acquisition_success:
+                print('\n[3/12] Reproject DEM images')
+                dem_file_path = os.path.join(path_to_dem, 'elev.tif')
+                reprojected_dem_path = os.path.join(path_to_dem, 'elev_reprojected.tif')
+                path_to_reprojected_dem = surehyp.atmoCorrection.reprojectDEM(
+                    pathToRadianceImage,
+                    path_elev=dem_file_path,
+                    path_elev_out=reprojected_dem_path
+                )
 
-            print("\n[5/12] Extract DEM data for Hyperion image pixels")
-            elev, slope, wazim = surehyp.atmoCorrection.extractDEMdata(pathToRadianceImage, path_elev=path_elev)
+                print('\n[4/12] Resampling DEM')
+                resampled_dem_path = os.path.join(dem_output_path, 'elev_resampled.tif')
+                path_elev = surehyp.atmoCorrection.matchResolution(
+                    pathToRadianceImage,
+                    path_elev=path_to_reprojected_dem,
+                    path_out=resampled_dem_path
+                )
+
+                print("\n[5/12] Extract DEM data for Hyperion image pixels")
+                elev, slope, wazim = surehyp.atmoCorrection.extractDEMdata(pathToRadianceImage, path_elev=path_elev)
+
+            elif use_flat_dem:
+                # Apply flat terrain assumption
+                print('\n[3-5/12] Creating flat terrain DEM (skipping reproject/resample)')
+
+                # Load image to get dimensions
+                import spectral.io.envi as envi
+                if os.path.exists(pathToRadianceImage + '.img'):
+                    img = envi.open(pathToRadianceImage + '.hdr', pathToRadianceImage + '.img')
+                else:
+                    img = envi.open(pathToRadianceImage + '.hdr', pathToRadianceImage + '.bip')
+
+                image_shape = (img.nrows, img.ncols)
+
+                # Use average scene elevation if available, otherwise sea level
+                try:
+                    avg_elev_km = getGEEdem_fixed(UL_lat, UL_lon, UR_lat, UR_lon,
+                                                   LL_lat, LL_lon, LR_lat, LR_lon,
+                                                   demID=demID, elevationName=elevationName)
+                    avg_elev_m = avg_elev_km * 1000
+                    print(f'    Using average scene elevation: {avg_elev_m:.1f} m')
+                except:
+                    avg_elev_m = 0
+                    print(f'    Using sea level (0 m) as reference elevation')
+
+                flat_terrain = apply_flat_terrain_assumption(
+                    image_shape=image_shape,
+                    output_path=dem_output_path,
+                    average_elevation_m=avg_elev_m
+                )
+
+                elev = flat_terrain['elev']
+                slope = flat_terrain['slope']
+                wazim = flat_terrain['aspect']
+
         except Exception as e:
-            print(f'\n    WARNING: Topographic correction failed: {e}')
-            print('    Continuing without topographic correction...')
+            print(f'\n    WARNING: DEM processing failed: {e}')
+            print('    Disabling topographic correction and continuing with flat surface assumption...')
             topo = False
+            elev = None
             slope = None
             wazim = None
 
@@ -1580,6 +1691,30 @@ if __name__ == '__main__':
     demID = 'USGS/SRTMGL1_003'
     elevationName = 'elevation'
 
+    # ============================================================
+    # DEM FALLBACK CONFIGURATION (NEW - Enhanced Error Handling)
+    # ============================================================
+    # Configure fallback strategy when primary DEM source fails
+
+    # Option 1: Provide local DEM file as backup (set to None if not available)
+    # This is useful if you have a pre-downloaded DEM for your region
+    local_dem_backup = None
+    # Example: local_dem_backup = basePath + 'DEM/my_local_dem.tif'
+
+    # Option 2: Alternative GEE DEM sources (automatically tried in order)
+    # Leave as None to use default fallbacks (NASADEM, ALOS, GTOPO30)
+    fallback_dem_sources = None
+    # Example custom fallbacks:
+    # fallback_dem_sources = [
+    #     {'id': 'NASA/NASADEM_HGT/001', 'band': 'elevation', 'name': 'NASADEM'},
+    #     {'id': 'JAXA/ALOS/AW3D30/V3_2', 'band': 'DSM', 'name': 'ALOS World 3D'},
+    # ]
+
+    # Option 3: Use flat terrain assumption if all DEM sources fail
+    # True = Continue processing with flat terrain (0° slope)
+    # False = Stop processing if DEM cannot be obtained
+    use_flat_terrain_fallback = True
+
     # Post-processing: generate quicklooks and statistics
     run_postprocessing = True
 
@@ -1734,7 +1869,10 @@ if __name__ == '__main__':
             elevationName=elevationName,
             smartsAlbedoFilePath=os.environ['SMARTSPATH'] + 'Albedo/Albedo.txt',
             snap_wavelength_file=snap_wavelength_file,
-            snap_keep_wavelength=snap_keep_wavelength
+            snap_keep_wavelength=snap_keep_wavelength,
+            local_dem_path=local_dem_backup,
+            fallback_dems=fallback_dem_sources,
+            use_flat_terrain_on_failure=use_flat_terrain_fallback
         )
 
     # STEP 3: Post-processing (visualization and statistics)
