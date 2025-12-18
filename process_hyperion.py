@@ -1333,7 +1333,25 @@ def plot_sample_spectra(R, bands, output_path, n_samples=5):
 
     # Step 2: Calculate mean spectrum from all valid pixels for plotting
     print(f'    Calculating mean spectrum from {len(valid_coords)} valid pixels...')
-    mean_spectrum = np.mean(R[valid_mask], axis=0)
+
+    # Collect spectra from valid pixels (handle memmap or spectral library objects)
+    # Use a subsample if there are too many pixels (for memory efficiency)
+    max_pixels_for_mean = 10000
+    if len(valid_coords) > max_pixels_for_mean:
+        mean_sample_indices = np.random.choice(len(valid_coords), max_pixels_for_mean, replace=False)
+        mean_spectra = []
+        for idx in mean_sample_indices:
+            row, col = valid_coords[idx]
+            spectrum = np.squeeze(R[row, col, :])
+            mean_spectra.append(spectrum)
+        mean_spectrum = np.mean(mean_spectra, axis=0)
+    else:
+        # For smaller datasets, collect all valid spectra
+        mean_spectra = []
+        for row, col in valid_coords:
+            spectrum = np.squeeze(R[row, col, :])
+            mean_spectra.append(spectrum)
+        mean_spectrum = np.mean(mean_spectra, axis=0)
 
     # Also select a few random individual pixels to plot
     n_individual = min(n_samples, len(valid_coords))
