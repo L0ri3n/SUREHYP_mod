@@ -972,12 +972,15 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
         wazim_has_nan = np.isnan(wazim).any()
 
         if elev_has_nan or slope_has_nan or wazim_has_nan:
-            print(f'    WARNING: DEM data contains NaN values!')
-            print(f'    Elevation NaN: {np.isnan(elev_km).sum()} pixels')
-            print(f'    Slope NaN: {np.isnan(slope).sum()} pixels')
-            print(f'    Aspect NaN: {np.isnan(wazim).sum()} pixels')
-            print(f'    These are likely ocean/water pixels where DEM has no data')
-            print(f'    Filling NaN values with sea level (0m) and flat terrain...')
+            nan_count = np.isnan(elev_km).sum()
+            total_pixels = elev_km.size
+            nan_ratio = nan_count / total_pixels if total_pixels > 0 else 0
+
+            # Only show detailed warning if NaN ratio is significant (>5%)
+            # Small amounts of NaN (e.g., ocean edges) are normal and handled silently
+            if nan_ratio > 0.05:
+                print(f'    Note: DEM contains {nan_ratio*100:.1f}% NaN values ({nan_count} pixels)')
+                print(f'    This is normal for regions with ocean/water. Filling with sea level (0m)...')
 
             # Create DEM visualization before filling NaN values
             import matplotlib.pyplot as plt
@@ -1242,6 +1245,40 @@ def compute_ndvi(R, bands):
     return ndvi
 
 
+def compute_ndwi(R, bands):
+    """
+    Compute NDWI (Normalized Difference Water Index) from reflectance data.
+
+    Parameters:
+    -----------
+    R : numpy.ndarray
+        Reflectance array (rows, cols, bands)
+    bands : numpy.ndarray
+        Wavelengths in nm
+
+    Returns:
+    --------
+    ndwi : numpy.ndarray
+        NDWI image
+    """
+    # Find band indices
+    green_idx = np.argmin(np.abs(bands - 550))  # ~550 nm (Green)
+    nir_idx = np.argmin(np.abs(bands - 860))    # ~860 nm (NIR)
+
+    green = R[:, :, green_idx].astype(float)
+    nir = R[:, :, nir_idx].astype(float)
+
+    # Compute NDWI with division safety
+    with np.errstate(invalid='ignore', divide='ignore'):
+        ndwi = (green - nir) / (green + nir)
+
+    # Mask invalid values
+    ndwi = np.where(np.isfinite(ndwi), ndwi, 0)
+    ndwi = np.clip(ndwi, -1, 1)
+
+    return ndwi
+
+
 def plot_sample_spectra(R, bands, output_path, n_samples=5):
     """
     Plot sample spectra from the reflectance image.
@@ -1255,29 +1292,85 @@ def plot_sample_spectra(R, bands, output_path, n_samples=5):
     output_path : str
         Path to save the plot
     n_samples : int
-        Number of random spectra to plot
+        Number of random spectra to plot (if 0, plots mean spectrum only)
     """
     import matplotlib.pyplot as plt
 
     rows, cols, nbands = R.shape
 
-    # Get random valid pixel locations
+    # Get all valid pixel locations
     np.random.seed(42)
     valid_mask = np.sum(R, axis=2) > 0
     valid_coords = np.argwhere(valid_mask)
 
-    if len(valid_coords) < n_samples:
-        print('    Warning: Not enough valid pixels for spectral plot')
+    if len(valid_coords) == 0:
+        print('    Warning: No valid pixels for spectral plot')
         return
 
-    sample_indices = np.random.choice(len(valid_coords), n_samples, replace=False)
+    # Step 1: Use more pixels for better spike detection (sample up to 100 pixels)
+    n_detect_samples = min(100, len(valid_coords))
+    detect_indices = np.random.choice(len(valid_coords), n_detect_samples, replace=False)
+
+    # Collect spectra for spike detection
+    detect_spectra = []
+    for idx in detect_indices:
+        row, col = valid_coords[idx]
+        spectrum = np.squeeze(R[row, col, :])
+        detect_spectra.append(spectrum)
+
+    detect_spectra = np.array(detect_spectra)
+
+    # Identify spike bands using median across many pixels
+    band_medians = np.median(detect_spectra, axis=0)
+    overall_median = np.median(band_medians)
+    band_mad = np.median(np.abs(band_medians - overall_median))
+
+    # Flag bands that are extreme outliers
+    if band_mad > 0:
+        bad_bands_mask = np.abs(band_medians - overall_median) > (10 * band_mad)
+    else:
+        bad_bands_mask = np.zeros(nbands, dtype=bool)
+
+    # Step 2: Calculate mean spectrum from all valid pixels for plotting
+    print(f'    Calculating mean spectrum from {len(valid_coords)} valid pixels...')
+    mean_spectrum = np.mean(R[valid_mask], axis=0)
+
+    # Also select a few random individual pixels to plot
+    n_individual = min(n_samples, len(valid_coords))
+    if n_individual > 0:
+        sample_indices = np.random.choice(len(valid_coords), n_individual, replace=False)
+
+    # Step 3: Create spectra with spike bands removed (set to NaN)
+    # This is for rescaling calculation - we use ALL data including spike positions
+    mean_spectrum_cleaned = mean_spectrum.copy()
+    mean_spectrum_cleaned[bad_bands_mask] = np.nan
+
+    # Find min/max from the cleaned data (excluding spikes) for rescaling
+    good_values = mean_spectrum_cleaned[~np.isnan(mean_spectrum_cleaned)]
+    if len(good_values) > 0:
+        vmin = np.min(good_values)
+        vmax = np.max(good_values)
+    else:
+        vmin = 0
+        vmax = 1
+
+    # Add padding
+    y_padding = (vmax - vmin) * 0.1
 
     plt.figure(figsize=(12, 6))
 
-    for idx in sample_indices:
-        row, col = valid_coords[idx]
-        spectrum = np.squeeze(R[row, col, :])  # Ensure 1D array
-        plt.plot(bands, spectrum, label=f'Pixel ({row}, {col})', alpha=0.7)
+    # Plot mean spectrum with gaps at spike bands
+    mean_masked = np.ma.masked_where(bad_bands_mask, mean_spectrum)
+    plt.plot(bands, mean_masked, label='Mean Spectrum (all valid pixels)',
+             linewidth=2, color='black', alpha=0.8)
+
+    # Plot individual sample spectra with gaps at spike bands
+    if n_individual > 0:
+        for idx in sample_indices:
+            row, col = valid_coords[idx]
+            spectrum = np.squeeze(R[row, col, :])
+            spectrum_masked = np.ma.masked_where(bad_bands_mask, spectrum)
+            plt.plot(bands, spectrum_masked, label=f'Pixel ({row}, {col})', alpha=0.5, linewidth=1)
 
     plt.xlabel('Wavelength (nm)')
     plt.ylabel('Reflectance')
@@ -1285,12 +1378,13 @@ def plot_sample_spectra(R, bands, output_path, n_samples=5):
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.xlim([400, 2500])
-    plt.ylim([0, None])
+    plt.ylim([max(0, vmin - y_padding), min(1.0, vmax + y_padding)])
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
     print(f'    Sample spectra plot saved to: {output_path}')
+    print(f'    Masked {np.sum(bad_bands_mask)} spike bands from plot')
 
 
 def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus_mask=None):
@@ -1475,7 +1569,7 @@ def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus
 
 def post_processing(R, bands, pathOut, fname):
     """
-    Generate post-processing outputs: quicklooks, NDVI, sample spectra.
+    Generate post-processing outputs: quicklooks, NDVI, NDWI, sample spectra.
 
     Parameters:
     -----------
@@ -1504,7 +1598,7 @@ def post_processing(R, bands, pathOut, fname):
     print('\n[2/7] Creating false color quicklook...')
     create_false_color_quicklook(R, bands, quicklooks_dir + fname + '_FalseColor.png')
 
-    print('\n[3/7] Computing NDVI...')
+    print('\n[3/8] Computing NDVI...')
     ndvi = compute_ndvi(R, bands)
 
     # Save NDVI as numpy array
@@ -1522,10 +1616,28 @@ def post_processing(R, bands, pathOut, fname):
     plt.close()
     print(f'    NDVI plot saved to: {quicklooks_dir + fname}_NDVI.png')
 
-    print('\n[4/7] Plotting sample spectra...')
+    print('\n[4/8] Computing NDWI...')
+    ndwi = compute_ndwi(R, bands)
+
+    # Save NDWI as numpy array
+    np.save(pathOut + fname + '_NDWI.npy', ndwi)
+    print(f'    NDWI array saved to: {pathOut + fname}_NDWI.npy')
+
+    # Plot NDWI
+    plt.figure(figsize=(10, 10))
+    im = plt.imshow(ndwi, cmap='Blues', vmin=-0.5, vmax=0.5)
+    plt.colorbar(im, label='NDWI', shrink=0.8)
+    plt.title('Normalized Difference Water Index (NDWI)')
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(quicklooks_dir + fname + '_NDWI.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'    NDWI plot saved to: {quicklooks_dir + fname}_NDWI.png')
+
+    print('\n[5/8] Plotting sample spectra...')
     plot_sample_spectra(R, bands, quicklooks_dir + fname + '_spectra.png')
 
-    print('\n[5/7] Visualizing valid pixel distribution...')
+    print('\n[6/8] Visualizing valid pixel distribution...')
     # Load masks if available
     clearview_mask = None
     cirrus_mask = None
@@ -1544,7 +1656,7 @@ def post_processing(R, bands, pathOut, fname):
     valid_stats, valid_mask = visualize_valid_pixels(R, bands, pathOut, fname,
                                                       clearview_mask, cirrus_mask)
 
-    print('\n[6/7] Computing statistics...')
+    print('\n[7/8] Computing statistics...')
     # Compute and print statistics
     n_valid = valid_stats['n_valid_clear']
     n_total = valid_stats['n_total']
@@ -1558,7 +1670,12 @@ def post_processing(R, bands, pathOut, fname):
     print(f'    NDVI range: {valid_ndvi.min():.3f} to {valid_ndvi.max():.3f}')
     print(f'    NDVI mean: {valid_ndvi.mean():.3f}')
 
-    print('\n[7/7] Saving comprehensive statistics...')
+    # NDWI statistics
+    valid_ndwi = ndwi[valid_mask]
+    print(f'    NDWI range: {valid_ndwi.min():.3f} to {valid_ndwi.max():.3f}')
+    print(f'    NDWI mean: {valid_ndwi.mean():.3f}')
+
+    print('\n[8/8] Saving comprehensive statistics...')
     # Save statistics to file
     with open(pathOut + fname + '_statistics.txt', 'w') as f:
         f.write(f'Hyperion Image Processing Statistics\n')
@@ -1581,6 +1698,12 @@ def post_processing(R, bands, pathOut, fname):
         f.write(f'  Max: {valid_ndvi.max():.3f}\n')
         f.write(f'  Mean: {valid_ndvi.mean():.3f}\n')
         f.write(f'  Std: {valid_ndvi.std():.3f}\n')
+        f.write(f'\n')
+        f.write(f'NDWI Statistics (valid pixels only):\n')
+        f.write(f'  Min: {valid_ndwi.min():.3f}\n')
+        f.write(f'  Max: {valid_ndwi.max():.3f}\n')
+        f.write(f'  Mean: {valid_ndwi.mean():.3f}\n')
+        f.write(f'  Std: {valid_ndwi.std():.3f}\n')
 
     print(f'    Statistics saved to: {pathOut + fname}_statistics.txt')
 
@@ -1687,8 +1810,8 @@ if __name__ == '__main__':
     use_topo = True
 
     # DEM source from Google Earth Engine
-    # Options: 'USGS/SRTMGL1_003' (global), 'NRCan/CDEM' (Canada), etc.
-    demID = 'USGS/SRTMGL1_003'
+    # Options: 'NASA/NASADEM_HGT/001' (improved SRTM), 'USGS/SRTMGL1_003' (global), 'NRCan/CDEM' (Canada), etc.
+    demID = 'NASA/NASADEM_HGT/001'  # Using NASADEM (improved SRTM) as primary
     elevationName = 'elevation'
 
     # ============================================================
@@ -1888,5 +2011,6 @@ if __name__ == '__main__':
     print(f'  - Clearview mask:        {pathOut + nameOut_reflectance}_clearview_mask.npy')
     print(f'  - Cirrus mask:           {pathOut + nameOut_reflectance}_cirrus_mask.npy')
     print(f'  - NDVI:                  {pathOut + fname}_NDVI.npy')
+    print(f'  - NDWI:                  {pathOut + fname}_NDWI.npy')
     print(f'  - Statistics:            {pathOut + fname}_statistics.txt')
     print(f'  - Quicklooks:            {pathOut}quicklooks/')

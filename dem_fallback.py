@@ -73,7 +73,7 @@ def downloadDEMfromGEE_robust(UL_lon, UL_lat, UR_lon, UR_lat, LR_lon, LR_lat, LL
     # Default fallback DEM sources (if not provided)
     if fallback_dems is None:
         fallback_dems = [
-            {'id': 'NASA/NASADEM_HGT/001', 'band': 'elevation', 'name': 'NASADEM (improved SRTM)'},
+            {'id': 'USGS/SRTMGL1_003', 'band': 'elevation', 'name': 'SRTM GL1 (30m global)'},
             {'id': 'JAXA/ALOS/AW3D30/V4_1', 'band': 'DSM', 'name': 'ALOS World 3D 30m V4'},
             {'id': 'USGS/GTOPO30', 'band': 'elevation', 'name': 'GTOPO30 (global, lower res)'},
         ]
@@ -219,19 +219,88 @@ def _download_dem_from_source(region, demID, elevationName, output_path):
                 f.write(response.content)
 
             # Verify the file is valid and contains sufficient data
+            print(f'      Validating DEM quality...')
             with rasterio.open(output_file) as src:
                 data = src.read(1)
-                # Check if we have valid data (not all zeros or NaN)
-                valid_data = data[(~np.isnan(data)) & (data != 0)]
+
+                # Check 1: Sufficient valid data
+                # Separate NaN from zero values - zero is valid for ocean/sea level!
+                nan_mask = np.isnan(data)
+                valid_mask = ~nan_mask  # All non-NaN values are valid (including zeros)
+                valid_data = data[valid_mask]
+                total_pixels = data.size
+                valid_ratio = len(valid_data) / total_pixels if total_pixels > 0 else 0
+
+                nan_count = np.sum(nan_mask)
+                # Count zeros only in valid (non-NaN) data
+                zero_count = np.sum(valid_data == 0) if len(valid_data) > 0 else 0
+
+                print(f'      - Total pixels: {total_pixels}')
+                print(f'      - Valid pixels: {len(valid_data)} ({valid_ratio*100:.1f}%)')
+                print(f'      - NaN pixels: {nan_count} ({nan_count/total_pixels*100:.1f}%)')
+                print(f'      - Zero elevation pixels (ocean/sea level): {zero_count} ({zero_count/total_pixels*100:.1f}%)')
+
                 if len(valid_data) < 100:  # Require at least 100 valid pixels
                     raise ValueError(f"DEM contains only {len(valid_data)} valid pixels (insufficient)")
 
-                # Additional check: ensure reasonable elevation range
+                if valid_ratio < 0.3:  # At least 30% of pixels should be valid
+                    raise ValueError(f"DEM has only {valid_ratio*100:.1f}% valid data (need >30%)")
+
+                # Check 2: Reasonable elevation range
                 if len(valid_data) > 0:
                     min_elev, max_elev = np.min(valid_data), np.max(valid_data)
+                    print(f'      - Elevation range: {min_elev:.1f} to {max_elev:.1f} m')
+
                     if max_elev - min_elev < 0.1 and max_elev < 10000:
                         # Suspiciously flat or all same value
-                        print(f"      Warning: DEM appears uniform (range: {min_elev:.1f} to {max_elev:.1f} m)")
+                        print(f"      WARNING: DEM appears uniform (range: {min_elev:.1f} to {max_elev:.1f} m)")
+
+                # Check 3: Spatial pattern validation - check if data is patchy
+                # Split DEM into quadrants and check if any quadrant has no valid data
+                rows, cols = data.shape
+                print(f'      - DEM dimensions: {rows} x {cols} pixels')
+
+                if rows > 10 and cols > 10:  # Only check if DEM is large enough
+                    mid_row, mid_col = rows // 2, cols // 2
+
+                    quadrants = [
+                        ('Top-Left', data[:mid_row, :mid_col]),
+                        ('Top-Right', data[:mid_row, mid_col:]),
+                        ('Bottom-Left', data[mid_row:, :mid_col]),
+                        ('Bottom-Right', data[mid_row:, mid_col:])
+                    ]
+
+                    print(f'      Checking spatial distribution (quadrant analysis):')
+
+                    # Threshold for minimum valid data per quadrant
+                    QUADRANT_THRESHOLD = 0.30  # 30% - each quadrant must have at least 30% valid data (non-NaN)
+
+                    bad_quadrants = 0
+                    quadrant_details = []
+                    bad_quadrant_names = []
+
+                    for name, quad in quadrants:
+                        # Only count NaN as invalid - zeros are valid (ocean/sea level)
+                        quad_valid = quad[~np.isnan(quad)]
+                        quad_valid_ratio = len(quad_valid) / quad.size if quad.size > 0 else 0
+                        quadrant_details.append(f'{name}: {quad_valid_ratio*100:.1f}% valid')
+
+                        if quad_valid_ratio < QUADRANT_THRESHOLD:
+                            bad_quadrants += 1
+                            bad_quadrant_names.append(f'{name} ({quad_valid_ratio*100:.1f}%)')
+
+                    for detail in quadrant_details:
+                        print(f'        - {detail}')
+
+                    # If ANY quadrant is below threshold, DEM is likely corrupted
+                    if bad_quadrants > 0:
+                        print(f'      ✗ FAILED: {bad_quadrants}/4 quadrants have <{QUADRANT_THRESHOLD*100:.0f}% valid data')
+                        print(f'        Bad quadrants: {", ".join(bad_quadrant_names)}')
+                        raise ValueError(f"DEM has {bad_quadrants}/4 quadrants below {QUADRANT_THRESHOLD*100:.0f}% threshold (possibly corrupted)")
+
+                    print(f'      ✓ Spatial distribution check passed ({QUADRANT_THRESHOLD*100:.0f}% threshold)')
+
+                print(f'      ✓ DEM quality validation passed')
 
             return output_path
         else:
