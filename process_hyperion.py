@@ -1733,44 +1733,68 @@ def post_processing(R, bands, pathOut, fname):
 if __name__ == '__main__':
 
     # ============================================================
-    # CONFIGURATION
+    # LOAD CONFIGURATION FROM config.py
+    # ============================================================
+    # Edit config.py to change image IDs and processing parameters
+    # All configuration is now centralized in one file!
     # ============================================================
 
-    # ============================================================
-    # GOOGLE EARTH ENGINE PROJECT ID
-    # ============================================================
-    # IMPORTANT: You MUST set your GEE project ID below!
-    #
-    # To get a project ID:
-    # 1. Go to https://code.earthengine.google.com/
-    # 2. If prompted, register for Earth Engine
-    # 3. Your project ID will be shown in the URL or in your account settings
-    #    It typically looks like: 'ee-yourusername' or 'your-project-name'
-    # 4. Replace 'YOUR_PROJECT_ID' below with your actual project ID
-    # ============================================================
+    import sys
+    import os
+    # Add current directory to path to import config
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import config
 
-    GEE_PROJECT_ID = 'remote-sensing-478802'  # Your GEE Project ID
+    # Load configuration
+    GEE_PROJECT_ID = config.GEE_PROJECT_ID
+    basePath = config.basePath
+    pathToL1Rmetadata = config.pathToL1Rmetadata
+    pathToL1Rimages = config.pathToL1Rimages
+    pathToL1Timages = config.pathToL1Timages
+    pathToL1TimagesFiltered = config.pathToL1TimagesFiltered
+    pathOut = config.pathOut
+    smartsPath = config.smartsPath
 
-    print('Initializing Google Earth Engine...')
+    # Image configuration
+    img_config = config.get_current_image_config()
+    fname = img_config['fname']
+    nameOut_radiance = img_config['nameOut_radiance']
+    nameOut_reflectance = img_config['nameOut_reflectance']
+
+    # Processing options
+    destripingMethod = config.destripingMethod
+    localDestriping = config.localDestriping
+    use_topo = config.use_topo
+    demID = config.demID
+    elevationName = config.elevationName
+
+    print('\n' + '=' * 60)
+    print('CONFIGURATION LOADED FROM config.py')
+    print('=' * 60)
+    print(f'Current image: {fname}')
+    print(f'Base path: {basePath}')
+    print(f'Output path: {pathOut}')
+    print('=' * 60)
+
+    print('\nInitializing Google Earth Engine...')
 
     if GEE_PROJECT_ID == 'YOUR_PROJECT_ID':
         print('\n' + '=' * 60)
         print('ERROR: GEE Project ID not configured!')
         print('=' * 60)
-        print('\nPlease edit process_hyperion.py and set your GEE project ID.')
+        print('\nPlease edit config.py and set your GEE project ID.')
         print('Look for the line: GEE_PROJECT_ID = "YOUR_PROJECT_ID"')
         print('\nTo get a project ID:')
         print('1. Go to https://code.earthengine.google.com/')
         print('2. Register/sign in with your Google account')
         print('3. Find your project ID (e.g., "ee-yourusername")')
         print('=' * 60)
-        raise ValueError('GEE Project ID not configured. Please edit the script.')
+        raise ValueError('GEE Project ID not configured. Please edit config.py')
 
     ee.Initialize(project=GEE_PROJECT_ID)
     print(f'GEE initialized with project: {GEE_PROJECT_ID}')
 
     # SMARTS configuration
-    smartsPath = 'C:/Program Files/SMARTS_295_PC/'
     os.environ['SMARTSPATH'] = smartsPath
 
     # Add SMARTS to PATH so the executable can be found
@@ -1781,99 +1805,17 @@ if __name__ == '__main__':
     surehyp.atmoCorrection.smartsExecutable = 'smarts295bat.exe'
     print(f"SMARTS path: {smartsPath}")
 
-    # ============================================================
-    # PATHS CONFIGURATION
-    # ============================================================
+    # Additional configuration from config.py
+    use_flat_dem = config.use_flat_dem
+    dem_fallback_elevation_m = config.dem_fallback_elevation_m
+    snap_wavelength_file = config.snap_wavelength_file
+    snap_keep_wavelength = config.snap_keep_wavelength
+    run_postprocessing = config.run_postprocessing
 
-    basePath = 'C:/Lorien/Archivos/TUBAF/1st_Semester/Remote_Sensing/'
-
-    # Path to USGS Hyperion metadata (optional, can be empty file)
-    pathToL1Rmetadata = basePath + 'METADATA/METADATA.csv'
-
-    # Path to L1R images (uncompressed folders)
-    pathToL1Rimages = basePath + 'L1R/'
-
-    # Path to L1T images (TIF files)
-    pathToL1Timages = basePath + 'L1T/'
-
-    # Path for filtered/processed L1T images
-    pathToL1TimagesFiltered = basePath + 'L1T/filteredImages/'
-
-    # Output folder
-    pathOut = basePath + 'OUT/'
-
-    # ============================================================
-    # IMAGE CONFIGURATION
-    # ============================================================
-
-    # Hyperion image ID (folder name)
-    fname = 'EO1H2020342013284110KF'
-
-    # Output names
-    nameOut_radiance = fname + '_preprocessed'
-    nameOut_reflectance = fname + '_reflectance'
-
-    # ============================================================
-    # PROCESSING OPTIONS
-    # ============================================================
-
-    # Destriping method: 'Pal' (recommended) or 'Datt'
-    destripingMethod = 'Pal'
-
-    # Local destriping refinement (slower but better results)
-    localDestriping = False
-
-    # Topographic correction
-    # Set to True to enable (requires DEM download from GEE)
-    use_topo = True
-
-    # DEM source from Google Earth Engine
-    # Options: 'NASA/NASADEM_HGT/001' (improved SRTM), 'USGS/SRTMGL1_003' (global), 'NRCan/CDEM' (Canada), etc.
-    demID = 'NASA/NASADEM_HGT/001'  # Using NASADEM (improved SRTM) as primary
-    elevationName = 'elevation'
-
-    # ============================================================
-    # DEM FALLBACK CONFIGURATION (NEW - Enhanced Error Handling)
-    # ============================================================
-    # Configure fallback strategy when primary DEM source fails
-
-    # Option 1: Provide local DEM file as backup (set to None if not available)
-    # This is useful if you have a pre-downloaded DEM for your region
+    # DEM fallback options (kept for compatibility)
     local_dem_backup = None
-    # Example: local_dem_backup = basePath + 'DEM/my_local_dem.tif'
-
-    # Option 2: Alternative GEE DEM sources (automatically tried in order)
-    # Leave as None to use default fallbacks (NASADEM, ALOS, GTOPO30)
     fallback_dem_sources = None
-    # Example custom fallbacks:
-    # fallback_dem_sources = [
-    #     {'id': 'NASA/NASADEM_HGT/001', 'band': 'elevation', 'name': 'NASADEM'},
-    #     {'id': 'JAXA/ALOS/AW3D30/V3_2', 'band': 'DSM', 'name': 'ALOS World 3D'},
-    # ]
-
-    # Option 3: Use flat terrain assumption if all DEM sources fail
-    # True = Continue processing with flat terrain (0° slope)
-    # False = Stop processing if DEM cannot be obtained
-    use_flat_terrain_fallback = True
-
-    # Post-processing: generate quicklooks and statistics
-    run_postprocessing = True
-
-    # ============================================================
-    # SNAP WAVELENGTH COMPATIBILITY OPTIONS
-    # ============================================================
-    # Configure how spectral wavelengths are written to ENVI HDR files
-    # for compatibility with SNAP software
-
-    # Option 1: Load wavelengths from external file (e.g., custom spectral calibration)
-    # Set to None to use wavelengths computed during processing
-    snap_wavelength_file = "C:/Lorien/Archivos/TUBAF/1st_Semester/Remote_Sensing/OUT/EO1H2020342016359110KF_reflectance_spectral_info.txt"
-    # Example: snap_wavelength_file = basePath + 'OUT/EO1H2020342016359110KF_reflectance_spectral_info.txt'
-
-    # Option 2: Keep wavelength field in HDR file
-    # - True: Better for SNAP visualization (wavelength labels show in plots)
-    # - False: Safer for SNAP band math expressions (avoids "Undefined function" errors)
-    snap_keep_wavelength = True  # Set to True to include wavelengths in HDR for SNAP
+    use_flat_terrain_fallback = use_flat_dem
 
     # ============================================================
     # METADATA XML CONFIGURATION (OPTIONAL)

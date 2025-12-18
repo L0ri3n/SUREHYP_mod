@@ -648,19 +648,35 @@ def process_image_pair_for_inundation(image1_id, image2_id, base_path, output_pa
 if __name__ == '__main__':
 
     # ============================================================
-    # CONFIGURATION
+    # LOAD CONFIGURATION FROM config.py
+    # ============================================================
+    # Edit config.py to change image IDs and processing parameters
+    # All configuration is now centralized in one file!
     # ============================================================
 
-    base_path = 'C:/Lorien/Archivos/TUBAF/1st_Semester/Remote_Sensing/'
-    output_path = base_path + 'OUT/'
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    import config
 
-    # Image IDs (chronological order: earlier first, later second)
-    image1_id = 'EO1H2020342013284110KF'  # 2013, day 284 (earlier)
-    image2_id = 'EO1H2020342016359110KF'  # 2016, day 359 (later)
+    # Load inundation configuration
+    inundation_config = config.get_inundation_config(pair_index=0)
+
+    base_path = inundation_config['base_path']
+    output_path = inundation_config['output_path']
+    image1_id = inundation_config['image1_id']
+    image2_id = inundation_config['image2_id']
+    inundation_threshold = inundation_config['threshold']
 
     # Processing options
-    run_preprocessing = False  # Set to True to run full preprocessing (not yet implemented)
-    inundation_threshold = 0.1  # NDWI increase threshold for inundation detection
+    run_preprocessing = False  # Always False (use existing reflectance files)
+
+    print('\n' + '=' * 60)
+    print('CONFIGURATION LOADED FROM config.py')
+    print('=' * 60)
+    print(f'Image pair: {image1_id} -> {image2_id}')
+    print(f'Threshold: {inundation_threshold}')
+    print(f'Base path: {base_path}')
+    print('=' * 60)
 
     # ============================================================
     # RUN INUNDATION MAPPING
