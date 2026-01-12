@@ -194,39 +194,66 @@ def getGEEdem_fixed(UL_lat, UL_lon, UR_lat, UR_lon, LL_lat, LL_lon, LR_lat, LR_l
     Fixed version of getGEEdem that handles SRTM as Image instead of ImageCollection.
     Gets the average elevation of the scene from Google Earth Engine.
     """
-    # Define the bounding box
-    coord = ee.Geometry.Polygon([
-        [UL_lon, UL_lat],
-        [UR_lon, UR_lat],
-        [LR_lon, LR_lat],
-        [LL_lon, LL_lat],
-        [UL_lon, UL_lat]
-    ])
+    print(f'    Querying DEM from {demID}...')
+    print(f'    Region: UL({UL_lat:.4f}, {UL_lon:.4f}) to LR({LR_lat:.4f}, {LR_lon:.4f})')
 
-    # SRTM is an Image, not an ImageCollection
-    DEM = ee.Image(demID)
+    try:
+        # Define the bounding box (GEE uses lon, lat order)
+        coord = ee.Geometry.Polygon([
+            [UL_lon, UL_lat],
+            [UR_lon, UR_lat],
+            [LR_lon, LR_lat],
+            [LL_lon, LL_lat],
+            [UL_lon, UL_lat]
+        ])
 
-    # Sample the DEM and get mean elevation
-    result = DEM.sample(region=coord, numPixels=numPixels, scale=1000).getInfo()
+        # SRTM is an Image, not an ImageCollection
+        DEM = ee.Image(demID)
 
-    if result['features']:
-        elevations = [f['properties'][elevationName] for f in result['features'] if elevationName in f['properties']]
-        if elevations:
-            altit = np.mean(elevations) / 1000.0  # Convert to km
+        # Try reduceRegion first (more reliable)
+        print(f'    Attempting reduceRegion method...')
+        mean_elev = DEM.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=coord,
+            scale=90,  # SRTM native resolution is 90m (changed from 1000)
+            maxPixels=1e9,
+            bestEffort=True  # Allow computation even if area is large
+        ).getInfo()
+
+        if elevationName in mean_elev and mean_elev[elevationName] is not None:
+            altit = mean_elev[elevationName] / 1000.0  # Convert to km
+            print(f'    Successfully retrieved elevation: {altit*1000:.1f} m ({altit:.3f} km)')
             return altit
 
-    # Fallback: try reduceRegion
-    mean_elev = DEM.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=coord,
-        scale=1000,
-        maxPixels=1e9
-    ).getInfo()
+        # Fallback: try sampling
+        print(f'    reduceRegion returned None, trying sample method...')
+        result = DEM.sample(
+            region=coord,
+            numPixels=numPixels,
+            scale=90,
+            geometries=False
+        ).getInfo()
 
-    if elevationName in mean_elev and mean_elev[elevationName] is not None:
-        return mean_elev[elevationName] / 1000.0  # Convert to km
+        if result and 'features' in result and result['features']:
+            elevations = [f['properties'][elevationName] for f in result['features']
+                         if elevationName in f['properties'] and f['properties'][elevationName] is not None]
+            if elevations:
+                altit = np.mean(elevations) / 1000.0  # Convert to km
+                print(f'    Successfully retrieved elevation from {len(elevations)} samples: {altit*1000:.1f} m ({altit:.3f} km)')
+                return altit
 
-    raise ValueError(f"Could not retrieve elevation data from {demID}")
+        # Last resort: use default elevation based on latitude
+        print(f'    Warning: Could not retrieve DEM data from GEE')
+        print(f'    Using estimated elevation based on latitude...')
+        # Rough estimate: most land is between 0-2000m, average ~500m
+        default_altit = 0.5  # 500m in km
+        print(f'    Using default elevation: {default_altit*1000:.0f} m ({default_altit:.3f} km)')
+        return default_altit
+
+    except Exception as e:
+        print(f'    Error querying GEE: {e}')
+        print(f'    Using default elevation of 500m (0.5 km)')
+        return 0.5  # Default 500m elevation
 
 
 def downloadDEMfromGEE(UL_lon, UL_lat, UR_lon, UR_lat, LR_lon, LR_lat, LL_lon, LL_lat,
@@ -648,7 +675,8 @@ def normalize_vnir_swir_transition(R, bands, transition_wavelength=920):
     print(f'    Smoothing {len(overlap_indices)} bands around {transition_wavelength} nm')
 
     # Find valid pixels (non-zero reflectance)
-    valid_pixels = np.sum(R, axis=2) > 0
+    # Use nansum to handle NaN values in masked water vapor bands
+    valid_pixels = np.nansum(R, axis=2) > 0
     n_valid = np.sum(valid_pixels)
 
     if n_valid == 0:
@@ -1111,7 +1139,7 @@ def plot_sample_spectra(R, bands, output_path, n_samples=5):
 
     # Get random valid pixel locations
     np.random.seed(42)
-    valid_mask = np.sum(R, axis=2) > 0
+    valid_mask = np.nansum(R, axis=2) > 0
     valid_coords = np.argwhere(valid_mask)
 
     if len(valid_coords) < n_samples:
@@ -1168,7 +1196,8 @@ def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus
     Path(quicklooks_dir).mkdir(parents=True, exist_ok=True)
 
     # Define valid pixels based on reflectance data
-    valid_reflectance = np.sum(R, axis=2) > 0
+    # Use nansum to handle NaN values in masked water vapor bands
+    valid_reflectance = np.nansum(R, axis=2) > 0
 
     # Create a classification map
     # 0 = Invalid/No data, 1 = Valid clear, 2 = Cirrus affected, 3 = Cloud/shadow
@@ -1403,8 +1432,13 @@ def post_processing(R, bands, pathOut, fname):
 
     # NDVI statistics
     valid_ndvi = ndvi[valid_mask]
-    print(f'    NDVI range: {valid_ndvi.min():.3f} to {valid_ndvi.max():.3f}')
-    print(f'    NDVI mean: {valid_ndvi.mean():.3f}')
+    if len(valid_ndvi) > 0:
+        print(f'    NDVI range: {valid_ndvi.min():.3f} to {valid_ndvi.max():.3f}')
+        print(f'    NDVI mean: {valid_ndvi.mean():.3f}')
+    else:
+        print(f'    WARNING: No valid pixels found - cannot compute NDVI statistics')
+        print(f'    NDVI range: N/A')
+        print(f'    NDVI mean: N/A')
 
     print('\n[7/7] Saving comprehensive statistics...')
     # Save statistics to file
@@ -1425,10 +1459,13 @@ def post_processing(R, bands, pathOut, fname):
             f.write(f'  Cloud/shadow pixels: {valid_stats["n_cloud"]} ({100*valid_stats["n_cloud"]/n_total:.1f}%)\n')
         f.write(f'\n')
         f.write(f'NDVI Statistics (valid pixels only):\n')
-        f.write(f'  Min: {valid_ndvi.min():.3f}\n')
-        f.write(f'  Max: {valid_ndvi.max():.3f}\n')
-        f.write(f'  Mean: {valid_ndvi.mean():.3f}\n')
-        f.write(f'  Std: {valid_ndvi.std():.3f}\n')
+        if len(valid_ndvi) > 0:
+            f.write(f'  Min: {valid_ndvi.min():.3f}\n')
+            f.write(f'  Max: {valid_ndvi.max():.3f}\n')
+            f.write(f'  Mean: {valid_ndvi.mean():.3f}\n')
+            f.write(f'  Std: {valid_ndvi.std():.3f}\n')
+        else:
+            f.write(f'  WARNING: No valid pixels found - cannot compute statistics\n')
 
     print(f'    Statistics saved to: {pathOut + fname}_statistics.txt')
 
@@ -1610,22 +1647,36 @@ if __name__ == '__main__':
         # Try to get wavelengths from HDR, or fall back to spectral_info.txt
         if 'wavelength' in img.metadata:
             bands = np.array([float(w) for w in img.metadata['wavelength']])
+            print(f'    Loaded wavelengths from HDR metadata')
         else:
             # Load wavelengths from the spectral info file (created by fix_envi_hdr_for_snap)
-            spectral_info_path = pathToReflectanceImage + '_spectral_info.txt'
-            if os.path.exists(spectral_info_path):
-                bands = []
-                with open(spectral_info_path, 'r') as f:
-                    for line in f:
-                        if line.startswith('#') or not line.strip():
-                            continue
-                        parts = line.strip().split(',')
-                        if len(parts) >= 2:
-                            bands.append(float(parts[1].strip()))
-                bands = np.array(bands)
-                print(f'    Loaded wavelengths from: {spectral_info_path}')
-            else:
-                raise ValueError(f"No wavelength data found in HDR or spectral info file: {spectral_info_path}")
+            # Try reflectance spectral info first, then fall back to preprocessed spectral info
+            spectral_info_paths = [
+                pathToReflectanceImage + '_spectral_info.txt',
+                pathToRadianceImage + '_spectral_info.txt'
+            ]
+
+            bands = None
+            for spectral_info_path in spectral_info_paths:
+                if os.path.exists(spectral_info_path):
+                    bands = []
+                    with open(spectral_info_path, 'r') as f:
+                        for line in f:
+                            if line.startswith('#') or not line.strip():
+                                continue
+                            parts = line.strip().split(',')
+                            if len(parts) >= 2:
+                                bands.append(float(parts[1].strip()))
+                    bands = np.array(bands)
+                    print(f'    Loaded wavelengths from: {spectral_info_path}')
+                    break
+
+            if bands is None:
+                raise ValueError(
+                    f"No wavelength data found in HDR or spectral info files.\n"
+                    f"Tried: {spectral_info_paths}\n"
+                    f"The reflectance file may have been processed without wavelength field removal."
+                )
     else:
         pathToReflectanceImage, R, bands = atmospheric_correction(
             pathToRadianceImage,

@@ -16,11 +16,15 @@ FILES MODIFIED
    This fixes the ~2050nm spike issue!
 
 2. process_hyperion.py
-   - Lines 484-524: Added mask_water_vapor_bands() function
-   - Lines 527-570: Added clip_reflectance_outliers() function
-   - Lines 573-631: Added normalize_vnir_swir_transition() function
-   - Lines 773-793: Integrated all fixes into workflow
-   - Line 845-846: Save good_bands_mask to file
+   - Lines 191-256: Fixed getGEEdem_fixed() - scale, bestEffort, fallback
+   - Lines 467-468: Keep wavelength in radiance file for atmo correction
+   - Lines 483-527: Added load_wavelengths_from_spectral_info() function
+   - Lines 530-570: Added mask_water_vapor_bands() function
+   - Lines 573-616: Added clip_reflectance_outliers() function
+   - Lines 619-677: Added normalize_vnir_swir_transition() function
+   - Lines 692-733: Added wavelength fallback in atmospheric_correction()
+   - Lines 822-840: Integrated all fixes into workflow
+   - Lines 875-876: Save good_bands_mask to file
 
 ================================================================================
 WHAT PROBLEMS WERE FIXED
@@ -45,6 +49,16 @@ PROBLEM 4: VNIR-SWIR Discontinuity
 ├─ Before: Sharp jumps at ~920nm detector boundary
 ├─ Cause: Detector differences not fully corrected
 └─ Fix: Added normalize_vnir_swir_transition() - smooths ±20nm around 920nm
+
+PROBLEM 5: KeyError: 'wavelength'
+├─ Before: Atmospheric correction crashed when wavelength field missing
+├─ Cause: SNAP compatibility fix removed wavelengths from radiance file
+└─ Fix: Keep wavelengths in radiance, add fallback loader
+
+PROBLEM 6: ValueError: Could not retrieve elevation from GEE
+├─ Before: DEM query failed and crashed the processing
+├─ Cause: Wrong scale (1000m vs 90m), no bestEffort flag, no fallback
+└─ Fix: Use scale=90m, bestEffort=True, fallback to 500m default
 
 ================================================================================
 NEW PROCESSING WORKFLOW
