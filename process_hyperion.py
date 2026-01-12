@@ -462,11 +462,10 @@ def preprocess_radiance(fname, pathToL1Rmetadata, pathToL1Rimages, pathToL1Timag
     surehyp.preprocess.savePreprocessedL1R(arrayL1Rgeoreferenced, wavelengths, fwhms, metadataGeoreferenced,
                                             pathToL1Rimages, pathToL1Rmetadata, metadata, fname, pathOut + nameOut)
 
-    # Fix HDR file for SNAP compatibility (uses parameters defined in main configuration)
-    # Note: snap_wavelength_file and snap_keep_wavelength are passed from main()
-    fix_envi_hdr_for_snap(pathOut + nameOut + '.hdr',
-                          wavelength_file=None,  # Uses computed wavelengths
-                          keep_wavelength=False)  # Default: remove for safety
+    # IMPORTANT: Keep wavelength field in preprocessed radiance file for atmospheric correction
+    # It will be removed/kept in the final reflectance file based on user settings
+    print('    Keeping wavelength field in radiance HDR for atmospheric correction...')
+    # Don't call fix_envi_hdr_for_snap here - wavelengths needed for next step
 
     # Cleanup temporary files
     for f in os.listdir(pathOut):
@@ -481,6 +480,203 @@ def preprocess_radiance(fname, pathToL1Rmetadata, pathToL1Rimages, pathToL1Timag
     return pathOut + nameOut
 
 
+def load_wavelengths_from_spectral_info(hdr_path):
+    """
+    Load wavelengths from the spectral_info.txt file created by fix_envi_hdr_for_snap.
+    This is a fallback when wavelength field is missing from HDR file.
+
+    Parameters:
+    -----------
+    hdr_path : str
+        Path to the HDR file
+
+    Returns:
+    --------
+    wavelengths : numpy.ndarray
+        Array of wavelengths in nm
+    fwhm : numpy.ndarray or None
+        Array of FWHM values if available
+    """
+    spectral_info_path = hdr_path.replace('.hdr', '_spectral_info.txt')
+
+    if not os.path.exists(spectral_info_path):
+        raise FileNotFoundError(
+            f"Wavelength field missing from HDR and spectral info file not found: {spectral_info_path}\n"
+            f"This can happen if SNAP compatibility fixes were applied to the radiance file.\n"
+            f"Solution: Re-run preprocessing without fixing the radiance HDR file."
+        )
+
+    print(f'    Loading wavelengths from: {spectral_info_path}')
+    wavelengths = []
+    fwhm_values = []
+
+    with open(spectral_info_path, 'r') as f:
+        for line in f:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = line.strip().split(',')
+            if len(parts) >= 2:
+                wavelengths.append(float(parts[1].strip()))
+                if len(parts) >= 3 and parts[2].strip() != 'N/A':
+                    fwhm_values.append(float(parts[2].strip()))
+
+    wavelengths = np.array(wavelengths)
+    fwhm = np.array(fwhm_values) if fwhm_values else None
+
+    print(f'    Loaded {len(wavelengths)} wavelengths from spectral info file')
+    return wavelengths, fwhm
+
+
+def mask_water_vapor_bands(R, bands):
+    """
+    Mask atmospheric water vapor absorption bands by setting them to NaN.
+    These bands are unreliable even after atmospheric correction.
+
+    Parameters:
+    -----------
+    R : numpy.ndarray
+        Reflectance array (rows, cols, bands)
+    bands : numpy.ndarray
+        Wavelengths in nm
+
+    Returns:
+    --------
+    R : numpy.ndarray
+        Reflectance with water bands masked
+    good_bands_mask : numpy.ndarray
+        Boolean mask (True = good band, False = bad band)
+    """
+    # Define water vapor absorption regions (nm)
+    water_bands = [
+        (1350, 1450),  # 1.4 μm water band
+        (1800, 1950),  # 1.9 μm water band
+    ]
+
+    # Create mask
+    good_bands_mask = np.ones(len(bands), dtype=bool)
+    n_masked_total = 0
+
+    for wv_min, wv_max in water_bands:
+        bad_bands_idx = np.where((bands >= wv_min) & (bands <= wv_max))[0]
+        good_bands_mask[bad_bands_idx] = False
+        R[:, :, bad_bands_idx] = np.nan  # Mask these bands
+        n_masked = len(bad_bands_idx)
+        n_masked_total += n_masked
+        print(f'    Masked {n_masked} bands in range {wv_min}-{wv_max} nm')
+
+    n_good = np.sum(good_bands_mask)
+    print(f'    Result: {n_good} good bands, {n_masked_total} masked bands')
+
+    return R, good_bands_mask
+
+
+def clip_reflectance_outliers(R, percentile=99.5):
+    """
+    Clip extreme reflectance outliers that indicate preprocessing errors.
+    Standard reflectance should be 0-1.0 (or 0-10,000 if scaled).
+
+    Parameters:
+    -----------
+    R : numpy.ndarray
+        Reflectance array (rows, cols, bands)
+    percentile : float
+        Percentile threshold for clipping (default 99.5%)
+
+    Returns:
+    --------
+    R : numpy.ndarray
+        Clipped reflectance
+    """
+    valid_R = R[R > 0]
+    if len(valid_R) == 0:
+        print('    Warning: No valid reflectance values found')
+        return R
+
+    threshold = np.percentile(valid_R, percentile)
+
+    # Typical reflectance should be < 1.0 (or 10,000 if scaled)
+    # If threshold is abnormally high, force it to reasonable values
+    if threshold > 15000:  # Likely a 10000-scaled reflectance with errors
+        max_allowed = 10000
+        print(f'    Detected scaled reflectance (threshold={threshold:.0f})')
+    elif threshold > 1.5:  # Likely unscaled reflectance with errors
+        max_allowed = 1.0
+        print(f'    Detected unscaled reflectance (threshold={threshold:.3f})')
+    else:
+        max_allowed = threshold
+        print(f'    Using {percentile}th percentile as threshold: {threshold:.3f}')
+
+    n_outliers = np.sum(R > max_allowed)
+    if n_outliers > 0:
+        print(f'    Clipping {n_outliers} outlier values (>{max_allowed:.2f})')
+        R = np.clip(R, 0, max_allowed)
+    else:
+        print(f'    No outliers detected')
+
+    return R
+
+
+def normalize_vnir_swir_transition(R, bands, transition_wavelength=920):
+    """
+    Smooth the VNIR-SWIR transition by applying spectral smoothing
+    in the overlap region to reduce detector discontinuities.
+
+    Parameters:
+    -----------
+    R : numpy.ndarray
+        Reflectance array (rows, cols, bands)
+    bands : numpy.ndarray
+        Wavelengths in nm
+    transition_wavelength : float
+        Center wavelength of transition (default 920 nm)
+
+    Returns:
+    --------
+    R : numpy.ndarray
+        Reflectance with smoothed VNIR-SWIR transition
+    """
+    from scipy.signal import savgol_filter  # noqa: F401 (imported but used below)
+
+    # Find overlap region (±20nm around transition)
+    overlap_mask = (bands >= transition_wavelength - 20) & (bands <= transition_wavelength + 20)
+    overlap_indices = np.where(overlap_mask)[0]
+
+    if len(overlap_indices) < 5:
+        print(f'    Warning: Not enough bands in overlap region for smoothing')
+        return R  # Need at least 5 points for savgol filter
+
+    print(f'    Smoothing {len(overlap_indices)} bands around {transition_wavelength} nm')
+
+    # Find valid pixels (non-zero reflectance)
+    valid_pixels = np.sum(R, axis=2) > 0
+    n_valid = np.sum(valid_pixels)
+
+    if n_valid == 0:
+        print(f'    Warning: No valid pixels found for smoothing')
+        return R
+
+    # Apply smoothing across transition for each valid pixel
+    n_smoothed = 0
+    for i in range(R.shape[0]):
+        for j in range(R.shape[1]):
+            if valid_pixels[i, j]:
+                spectrum = R[i, j, :].copy()
+                # Smooth only the overlap region
+                try:
+                    spectrum[overlap_indices] = savgol_filter(
+                        spectrum[overlap_indices],
+                        window_length=5,
+                        polyorder=2
+                    )
+                    R[i, j, :] = spectrum
+                    n_smoothed += 1
+                except:
+                    pass  # Skip if smoothing fails for this pixel
+
+    print(f'    Smoothed {n_smoothed} valid pixels in VNIR-SWIR transition')
+    return R
+
+
 def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, stepTilt=15,
                            stepWazim=30, demID='USGS/SRTMGL1_003', elevationName='elevation',
                            topo=True, smartsAlbedoFilePath=None,
@@ -493,7 +689,48 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
     print('=' * 60)
 
     print('\n[1/12] Open processed radiance image')
-    L, bands, fwhms, processing_metadata, metadata = surehyp.atmoCorrection.getImageAndParameters(pathToRadianceImage)
+    try:
+        L, bands, fwhms, processing_metadata, metadata = surehyp.atmoCorrection.getImageAndParameters(pathToRadianceImage)
+    except KeyError as e:
+        if 'wavelength' in str(e):
+            print('    Warning: Wavelength field missing from HDR file')
+            print('    Attempting to load from spectral_info.txt file...')
+
+            # Load image without wavelength info
+            import spectral.io.envi as envi
+            hdr_path = pathToRadianceImage + '.hdr'
+            img_path = pathToRadianceImage + '.img' if os.path.exists(pathToRadianceImage + '.img') else pathToRadianceImage + '.bip'
+
+            img = envi.open(hdr_path, img_path)
+            L = img.load()
+            metadata = img.metadata.copy()
+
+            # Load wavelengths from spectral_info.txt
+            bands, fwhms = load_wavelengths_from_spectral_info(hdr_path)
+
+            # Extract processing metadata manually
+            processing_metadata = {
+                'longit': float(metadata.get('longit', 0)),
+                'latit': float(metadata.get('latit', 0)),
+                'datestamp1': metadata.get('datestamp1', ''),
+                'zenith': float(metadata.get('zenith', 0)),
+                'azimuth': float(metadata.get('azimuth', 0)),
+                'satelliteZenith': float(metadata.get('satellite zenith', 0)),
+                'satelliteAzimuth': float(metadata.get('satellite azimuth', 0)),
+                'UL_lat': float(metadata.get('ul lat', 0)),
+                'UL_lon': float(metadata.get('ul lon', 0)),
+                'UR_lat': float(metadata.get('ur lat', 0)),
+                'UR_lon': float(metadata.get('ur lon', 0)),
+                'LL_lat': float(metadata.get('ll lat', 0)),
+                'LL_lon': float(metadata.get('ll lon', 0)),
+                'LR_lat': float(metadata.get('lr lat', 0)),
+                'LR_lon': float(metadata.get('lr lon', 0)),
+                'year': int(metadata.get('year', 0)),
+                'doy': int(metadata.get('doy', 0)),
+            }
+            print('    Successfully loaded wavelengths from spectral_info.txt')
+        else:
+            raise
 
     # Extract metadata for clearer visualization
     longit = processing_metadata['longit']
@@ -622,6 +859,26 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
     print('\nComputing radiance to reflectance conversion...')
     R = surehyp.atmoCorrection.computeLtoR(L, bands, df, df_gs)
 
+    # ============================================================
+    # APPLY PREPROCESSING FIXES FOR SAM CLASSIFICATION
+    # ============================================================
+    print('\n' + '-' * 60)
+    print('APPLYING POST-CORRECTION PREPROCESSING FIXES')
+    print('-' * 60)
+
+    print('\n[Fix 1/3] Clipping reflectance outliers...')
+    R = clip_reflectance_outliers(R, percentile=99.5)
+
+    print('\n[Fix 2/3] Masking water vapor absorption bands...')
+    R, good_bands_mask = mask_water_vapor_bands(R, bands)
+
+    print('\n[Fix 3/3] Smoothing VNIR-SWIR detector transition...')
+    R = normalize_vnir_swir_transition(R, bands, transition_wavelength=920)
+
+    print('\n' + '-' * 60)
+    print('POST-CORRECTION FIXES COMPLETE!')
+    print('-' * 60)
+
     if not topo:
         print('\nSaving the reflectance image (flat surface)...')
         surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
@@ -672,6 +929,8 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
     pathOutDir = os.path.dirname(pathToOutImage) + '/'
     np.save(pathOutDir + os.path.basename(pathToOutImage) + '_clearview_mask.npy', clearview)
     np.save(pathOutDir + os.path.basename(pathToOutImage) + '_cirrus_mask.npy', cirrus_cloudMask)
+    np.save(pathOutDir + os.path.basename(pathToOutImage) + '_good_bands_mask.npy', good_bands_mask)
+    print(f'    Saved good bands mask to: {pathOutDir + os.path.basename(pathToOutImage)}_good_bands_mask.npy')
 
     print('\n' + '=' * 60)
     print('ATMOSPHERIC CORRECTION COMPLETE!')

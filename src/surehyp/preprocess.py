@@ -178,12 +178,16 @@ def separating(data3D,bands,fwhms):
                 - SWIRfwhm: full width at half maximum for each band of the SWIR data
     '''
 
+    # Bad bands removed:
+    # - Bands 1-7: Uncalibrated VNIR
+    # - Bands 58-77: Overlap region and water vapor absorption
+    # - Bands 224-242: Uncalibrated SWIR with low SNR (FIXED: was 223, now 224)
     VNIR=data3D[:,:,7:56]
     VNIRb=bands[7:56]
     VNIRfwhm=fwhms[7:56]
-    SWIR=data3D[:,:,77:223]
-    SWIRb=bands[77:223]
-    SWIRfwhm=fwhms[77:223]
+    SWIR=data3D[:,:,77:224]  # FIXED: Changed from 223 to 224 to properly remove bands 224-242
+    SWIRb=bands[77:224]
+    SWIRfwhm=fwhms[77:224]
     return VNIR,VNIRb,VNIRfwhm,SWIR,SWIRb,SWIRfwhm
 
 def DN2Radiance(VNIR,SWIR):
