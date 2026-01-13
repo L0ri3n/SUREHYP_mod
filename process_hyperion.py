@@ -1031,33 +1031,12 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
     print('=' * 60)
 
     # ============================================================
-    # APPLY PREPROCESSING FIXES FOR SAM CLASSIFICATION
+    # TOPOGRAPHIC CORRECTION (if enabled)
+    # CRITICAL: Must be done BEFORE preprocessing because:
+    # 1. Albedo file generation can't handle NaN values
+    # 2. Preprocessing masks water vapor bands and bad bands with NaN
     # ============================================================
-    print('\n' + '-' * 60)
-    print('APPLYING POST-CORRECTION PREPROCESSING FIXES')
-    print('-' * 60)
-
-    print('\n[Fix 1/3] Clipping reflectance outliers...')
-    R = clip_reflectance_outliers(R, percentile=99.5)
-
-    print('\n[Fix 2/3] Masking water vapor absorption bands...')
-    R, good_bands_mask = mask_water_vapor_bands(R, bands)
-
-    print('\n[Fix 3/3] Smoothing VNIR-SWIR detector transition...')
-    R = normalize_vnir_swir_transition(R, bands, transition_wavelength=920)
-
-    print('\n' + '-' * 60)
-    print('POST-CORRECTION FIXES COMPLETE!')
-    print('-' * 60)
-
-    if not topo:
-        print('\nSaving the reflectance image (flat surface)...')
-        surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
-        # Fix HDR file for SNAP compatibility
-        fix_envi_hdr_for_snap(pathToOutImage + '.hdr',
-                              wavelength_file=snap_wavelength_file,
-                              keep_wavelength=snap_keep_wavelength)
-    else:
+    if topo:
         print('\n--- TOPOGRAPHIC CORRECTION ---')
 
         if smartsAlbedoFilePath is None:
@@ -1093,28 +1072,107 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
             topo = False
 
         if topo:  # Only continue if albedo file was processed successfully
-            print('\nComputing LUT for rough terrain correction')
-            R = surehyp.atmoCorrection.getDemReflectance(altitMap=elev, tiltMap=slope, wazimMap=wazim,
-                                                          stepAltit=stepAltit, stepTilt=stepTilt,
-                                                          stepWazim=stepWazim, latit=latit,
-                                                          IH2O=0, WV=wv, IO3=IO3, IALT=0, AbO3=o3,
-                                                          doy=doy, zenith=zenith, azimuth=azimuth,
-                                                          satelliteZenith=satelliteZenith,
-                                                          satelliteAzimuth=satelliteAzimuth,
-                                                          L=L, bands=bands, IALBDX=1,
-                                                          rho_background=rho_background)
+            try:
+                # Validate and clip DEM values to reasonable ranges
+                print('\nValidating DEM data ranges...')
 
-            print('\nApplying Modified-Minnaert topography correction')
-            R = surehyp.atmoCorrection.MM_topo_correction(R, bands, slope * np.pi / 180,
-                                                           wazim * np.pi / 180, zenith * np.pi / 180,
-                                                           azimuth * np.pi / 180)
+                # Check elevation range (typical range: -500 to 9000m)
+                elev_min, elev_max = np.nanmin(elev), np.nanmax(elev)
+                print(f'  Elevation range: {elev_min:.1f} to {elev_max:.1f} m')
 
-            print('\nSaving the reflectance image (with topographic correction)...')
-            surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
-        # Fix HDR file for SNAP compatibility
-        fix_envi_hdr_for_snap(pathToOutImage + '.hdr',
-                              wavelength_file=snap_wavelength_file,
-                              keep_wavelength=snap_keep_wavelength)
+                # Check slope range (0 to 90 degrees)
+                slope_min, slope_max = np.nanmin(slope), np.nanmax(slope)
+                print(f'  Slope range: {slope_min:.1f} to {slope_max:.1f} degrees')
+
+                # Check wazim range (0 to 360 degrees)
+                wazim_min, wazim_max = np.nanmin(wazim), np.nanmax(wazim)
+                print(f'  Azimuth range: {wazim_min:.1f} to {wazim_max:.1f} degrees')
+
+                # Clip values to safe ranges for LUT
+                # The LUT is built with specific ranges, so we need to ensure values are within bounds
+
+                # For elevation: typically the LUT covers a range around the mean elevation
+                # We'll use a conservative approach and clip to ±3000m from mean
+                mean_elevation = np.nanmean(elev)
+                elev_clipped = np.clip(elev, mean_elevation - 3000, mean_elevation + 3000)
+                if not np.array_equal(elev, elev_clipped):
+                    print(f'  ⚠️  Clipped elevation to range [{mean_elevation - 3000:.1f}, {mean_elevation + 3000:.1f}] m')
+
+                # For slope: clip to 0-89 degrees (LUT typically doesn't handle 90°)
+                slope_clipped = np.clip(slope, 0, 89)
+                if not np.array_equal(slope, slope_clipped):
+                    print(f'  ⚠️  Clipped slope to range [0, 89] degrees')
+
+                # For wazim: ensure it's in 0-360 range
+                wazim_clipped = np.clip(wazim, 0, 360)
+                if not np.array_equal(wazim, wazim_clipped):
+                    print(f'  ⚠️  Clipped azimuth to range [0, 360] degrees')
+
+                print('\nComputing LUT for rough terrain correction')
+                R = surehyp.atmoCorrection.getDemReflectance(altitMap=elev_clipped, tiltMap=slope_clipped,
+                                                              wazimMap=wazim_clipped,
+                                                              stepAltit=stepAltit, stepTilt=stepTilt,
+                                                              stepWazim=stepWazim, latit=latit,
+                                                              IH2O=0, WV=wv, IO3=IO3, IALT=0, AbO3=o3,
+                                                              doy=doy, zenith=zenith, azimuth=azimuth,
+                                                              satelliteZenith=satelliteZenith,
+                                                              satelliteAzimuth=satelliteAzimuth,
+                                                              L=L, bands=bands, IALBDX=1,
+                                                              rho_background=rho_background)
+
+                print('\nApplying Modified-Minnaert topography correction')
+                R = surehyp.atmoCorrection.MM_topo_correction(R, bands, slope_clipped * np.pi / 180,
+                                                               wazim_clipped * np.pi / 180, zenith * np.pi / 180,
+                                                               azimuth * np.pi / 180)
+
+                print('✅ Topographic correction completed successfully')
+
+            except ValueError as e:
+                if "out of bounds" in str(e):
+                    print(f'\n⚠️  ERROR: DEM values are out of bounds for LUT interpolation')
+                    print(f'    Error details: {e}')
+                    print(f'    This usually means the elevation/slope/azimuth values exceed the LUT range.')
+                    print(f'\n    Skipping topographic correction and continuing with flat terrain...')
+                    topo = False
+                else:
+                    raise
+            except Exception as e:
+                print(f'\n⚠️  ERROR during topographic correction: {e}')
+                print(f'    Skipping topographic correction and continuing with flat terrain...')
+                topo = False
+
+    # ============================================================
+    # APPLY PREPROCESSING FIXES FOR SAM CLASSIFICATION
+    # CRITICAL: Must be done AFTER topographic correction
+    # ============================================================
+    print('\n' + '-' * 60)
+    print('APPLYING POST-CORRECTION PREPROCESSING FIXES')
+    print('-' * 60)
+
+    print('\n[Fix 1/3] Clipping reflectance outliers...')
+    R = clip_reflectance_outliers(R, percentile=99.5)
+
+    print('\n[Fix 2/3] Masking water vapor absorption bands...')
+    R, good_bands_mask = mask_water_vapor_bands(R, bands)
+
+    print('\n[Fix 3/3] Smoothing VNIR-SWIR detector transition...')
+    R = normalize_vnir_swir_transition(R, bands, transition_wavelength=920)
+
+    print('\n' + '-' * 60)
+    print('POST-CORRECTION FIXES COMPLETE!')
+    print('-' * 60)
+
+    # ============================================================
+    # SAVE REFLECTANCE IMAGE
+    # ============================================================
+    topo_status = "with topographic correction" if topo else "flat surface"
+    print(f'\nSaving the reflectance image ({topo_status})...')
+    surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
+
+    # Fix HDR file for SNAP compatibility
+    fix_envi_hdr_for_snap(pathToOutImage + '.hdr',
+                          wavelength_file=snap_wavelength_file,
+                          keep_wavelength=snap_keep_wavelength)
 
     # Save masks
     pathOutDir = os.path.dirname(pathToOutImage) + '/'
@@ -1714,7 +1772,7 @@ if __name__ == '__main__':
     # ============================================================
 
     # Hyperion image ID (folder name)
-    fname = 'EO1H2020342013284110KF'
+    fname = 'EO1H0370412009266110PF'
 
     # Output names
     nameOut_radiance = fname + '_preprocessed'

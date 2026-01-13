@@ -10,7 +10,7 @@ import glob
 from pathlib import Path
 
 OUTDIR = Path(r"C:\Lorien\Archivos\TUBAF\1st_Semester\Remote_Sensing\OUT")
-FNAME = "EO1H2020342013284110KF"
+FNAME = "EO1H0370412009266110PF"
 
 print("=" * 80)
 print("PREPARING FOR REPROCESSING")
