@@ -602,6 +602,9 @@ def clip_reflectance_outliers(R, percentile=99.5):
     Clip extreme reflectance outliers that indicate preprocessing errors.
     Standard reflectance should be 0-1.0 (or 0-10,000 if scaled).
 
+    This function now also identifies and masks bands with consistently extreme values,
+    which typically indicate bad bands that weren't properly removed during preprocessing.
+
     Parameters:
     -----------
     R : numpy.ndarray
@@ -612,33 +615,90 @@ def clip_reflectance_outliers(R, percentile=99.5):
     Returns:
     --------
     R : numpy.ndarray
-        Clipped reflectance
+        Clipped reflectance with bad bands masked
     """
     valid_R = R[R > 0]
     if len(valid_R) == 0:
         print('    Warning: No valid reflectance values found')
         return R
 
-    threshold = np.percentile(valid_R, percentile)
+    # First, check for bands with extreme maximum values (bad bands)
+    # These indicate uncalibrated or miscalibrated bands
+    max_per_band = np.nanmax(R, axis=(0, 1))
 
+    # Physical maximum reflectance is ~1.0 (or 10,000 if scaled by 10000)
+    # But we'll be conservative - anything > 2.0 in unscaled or > 20000 in scaled is definitely wrong
+    bad_band_threshold_unscaled = 2.0
+    bad_band_threshold_scaled = 20000
+
+    # Detect if data appears to be scaled
+    median_max = np.median(max_per_band[max_per_band > 0])
+
+    if median_max > 100:
+        # Likely scaled data (10000x or similar)
+        bad_band_threshold = bad_band_threshold_scaled
+        print(f'    Detected scaled reflectance (median max: {median_max:.0f})')
+    else:
+        # Likely unscaled (0-1 range)
+        bad_band_threshold = bad_band_threshold_unscaled
+        print(f'    Detected unscaled reflectance (median max: {median_max:.4f})')
+
+    # Find bands exceeding threshold
+    bad_bands_mask = max_per_band > bad_band_threshold
+    n_bad_bands = np.sum(bad_bands_mask)
+
+    if n_bad_bands > 0:
+        bad_bands_idx = np.where(bad_bands_mask)[0]
+        print(f'    ⚠️  WARNING: Found {n_bad_bands} bands with extreme max values (bad calibration)')
+        print(f'    These bands will be masked (set to NaN):')
+        for idx in bad_bands_idx[:10]:  # Show first 10
+            print(f'      Band {idx+1}: max = {max_per_band[idx]:.2f}')
+        if n_bad_bands > 10:
+            print(f'      ... and {n_bad_bands-10} more')
+
+        # Mask these bands entirely
+        R[:, :, bad_bands_idx] = np.nan
+
+        # Recompute valid pixels after masking bad bands
+        valid_R = R[R > 0]
+        if len(valid_R) == 0:
+            print('    ERROR: No valid data remaining after bad band removal!')
+            return R
+
+    # Now apply percentile-based clipping to remaining data
+    threshold = np.nanpercentile(valid_R, percentile)
+
+    # Set maximum allowed based on data scale
     # Typical reflectance should be < 1.0 (or 10,000 if scaled)
-    # If threshold is abnormally high, force it to reasonable values
-    if threshold > 15000:  # Likely a 10000-scaled reflectance with errors
+    if threshold > 15000:  # Likely a 10000-scaled reflectance
         max_allowed = 10000
-        print(f'    Detected scaled reflectance (threshold={threshold:.0f})')
-    elif threshold > 1.5:  # Likely unscaled reflectance with errors
+        print(f'    Setting max allowed to {max_allowed} (scaled reflectance)')
+    elif threshold > 1.5:  # Unscaled reflectance but high
         max_allowed = 1.0
-        print(f'    Detected unscaled reflectance (threshold={threshold:.3f})')
+        print(f'    Setting max allowed to {max_allowed} (physical maximum)')
     else:
         max_allowed = threshold
-        print(f'    Using {percentile}th percentile as threshold: {threshold:.3f}')
+        print(f'    Using {percentile}th percentile as threshold: {threshold:.4f}')
 
     n_outliers = np.sum(R > max_allowed)
     if n_outliers > 0:
-        print(f'    Clipping {n_outliers} outlier values (>{max_allowed:.2f})')
+        print(f'    Clipping {n_outliers} pixel values to max = {max_allowed:.4f}')
         R = np.clip(R, 0, max_allowed)
     else:
-        print(f'    No outliers detected')
+        print(f'    No pixel-level outliers detected')
+
+    # Final validation
+    final_valid = R[R > 0]
+    if len(final_valid) > 0:
+        final_max = np.nanmax(final_valid)
+        final_mean = np.nanmean(final_valid)
+        print(f'    ✅ After clipping: max = {final_max:.4f}, mean = {final_mean:.4f}')
+
+        # Warn if still suspicious
+        expected_max = 10000 if median_max > 100 else 1.0
+        if final_max > expected_max * 1.5:
+            print(f'    ⚠️  WARNING: Max value still high ({final_max:.2f} > {expected_max*1.5:.2f})')
+            print(f'    Consider reprocessing or checking bad band removal')
 
     return R
 
@@ -888,6 +948,89 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
     R = surehyp.atmoCorrection.computeLtoR(L, bands, df, df_gs)
 
     # ============================================================
+    # SMART FIX: Remove bad bands FIRST, then correct scale
+    # ============================================================
+    print('\n' + '=' * 60)
+    print('SMART CORRECTION: Remove Bad Bands Before Scale Correction')
+    print('=' * 60)
+
+    # Step 1: Identify and mask bad bands using robust statistics
+    max_per_band = np.max(R, axis=(0,1))
+
+    # Use MAD (Median Absolute Deviation) - robust to outliers
+    median_max = np.median(max_per_band)
+    mad = np.median(np.abs(max_per_band - median_max))
+
+    # Bands more than 10 MADs above median are considered bad
+    bad_band_threshold = median_max + (10 * mad * 1.4826)  # 1.4826 = MAD to std
+
+    print(f'  Median of band maxima: {median_max:.2e}')
+    print(f'  MAD: {mad:.2e}')
+    print(f'  Bad band threshold: {bad_band_threshold:.2e}')
+
+    bad_bands_idx = np.where(max_per_band > bad_band_threshold)[0]
+
+    if len(bad_bands_idx) > 0:
+        print(f'\n  🎯 STEP 1: Found {len(bad_bands_idx)} bad bands to remove:')
+        for idx in bad_bands_idx[:10]:
+            print(f'    Band #{idx+1} ({bands[idx]:.2f} nm): max = {max_per_band[idx]:.2e}')
+        if len(bad_bands_idx) > 10:
+            print(f'    ... and {len(bad_bands_idx)-10} more')
+
+        print(f'  Masking these bands (NaN)...')
+        R[:, :, bad_bands_idx] = np.nan
+    else:
+        print(f'\n  ✅ No extreme bad bands detected')
+
+    # Step 2: Calculate scale correction from CLEAN data only
+    valid_R = R[np.isfinite(R) & (R > 0)]
+
+    if len(valid_R) > 0:
+        p99 = np.percentile(valid_R, 99)
+        p50 = np.median(valid_R)
+
+        print(f'\n  🎯 STEP 2: Check scale using clean data:')
+        print(f'    Min:    {np.min(valid_R):.6e}')
+        print(f'    Median: {p50:.6e}')
+        print(f'    99th %: {p99:.6e}')
+        print(f'    Max:    {np.max(valid_R):.6e}')
+
+        # Determine if correction needed based on 99th percentile
+        if p99 > 100:
+            print(f'\n  🚨 CRITICAL: Scale is wrong!')
+            print(f'     Expected 99th %: ~0.8 or ~8000')
+            print(f'     Actual 99th %: {p99:.0f}')
+
+            # Smart target detection
+            if p99 > 5000:
+                target = 8000  # 10000-scale
+                scale_name = "0-10000"
+            else:
+                target = 0.8   # 0-1 scale
+                scale_name = "0-1"
+
+            correction_factor = p99 / target
+
+            print(f'     Target scale: {scale_name}')
+            print(f'     Correction factor: {correction_factor:.2f}')
+            print(f'\n  Applying correction: R = R / {correction_factor:.2f}')
+
+            R = R / correction_factor
+
+            # Verify
+            valid_fixed = R[np.isfinite(R) & (R > 0)]
+            print(f'\n  ✅ After correction:')
+            print(f'    Min:    {np.min(valid_fixed):.6f}')
+            print(f'    Median: {np.median(valid_fixed):.6f}')
+            print(f'    99th %: {np.percentile(valid_fixed, 99):.6f}')
+            print(f'    Max:    {np.max(valid_fixed):.6f}')
+
+        else:
+            print(f'\n  ✅ Scale is correct - no correction needed')
+
+    print('=' * 60)
+
+    # ============================================================
     # APPLY PREPROCESSING FIXES FOR SAM CLASSIFICATION
     # ============================================================
     print('\n' + '-' * 60)
@@ -921,33 +1064,53 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
             smartsAlbedoFilePath = os.environ['SMARTSPATH'] + 'Albedo/Albedo.txt'
 
         print('\nWriting Albedo.txt file for SMARTS')
-        pathToAlbedoFile = surehyp.atmoCorrection.writeAlbedoFile(R, bands, pathOut=smartsAlbedoFilePath)
+        try:
+            pathToAlbedoFile = surehyp.atmoCorrection.writeAlbedoFile(R, bands, pathOut=smartsAlbedoFilePath)
 
-        print('\nGetting scene background reflectance')
-        sp = pd.read_csv(pathToAlbedoFile, header=3, sep=r'\s+')
-        w = sp.values[:, 0]
-        r = sp.values[:, 1]
-        f = interpolate.interp1d(w, r, bounds_error=False, fill_value='extrapolate')
-        rho_background = f(df['Wvlgth'] * 1E-3)
+            print('\nGetting scene background reflectance')
+            sp = pd.read_csv(pathToAlbedoFile, header=3, sep=r'\s+')
 
-        print('\nComputing LUT for rough terrain correction')
-        R = surehyp.atmoCorrection.getDemReflectance(altitMap=elev, tiltMap=slope, wazimMap=wazim,
-                                                      stepAltit=stepAltit, stepTilt=stepTilt,
-                                                      stepWazim=stepWazim, latit=latit,
-                                                      IH2O=0, WV=wv, IO3=IO3, IALT=0, AbO3=o3,
-                                                      doy=doy, zenith=zenith, azimuth=azimuth,
-                                                      satelliteZenith=satelliteZenith,
-                                                      satelliteAzimuth=satelliteAzimuth,
-                                                      L=L, bands=bands, IALBDX=1,
-                                                      rho_background=rho_background)
+            # Handle case where pandas didn't parse columns correctly
+            if sp.shape[1] < 2:
+                raise ValueError(f"Albedo file has only {sp.shape[1]} column(s), expected 2")
 
-        print('\nApplying Modified-Minnaert topography correction')
-        R = surehyp.atmoCorrection.MM_topo_correction(R, bands, slope * np.pi / 180,
-                                                       wazim * np.pi / 180, zenith * np.pi / 180,
-                                                       azimuth * np.pi / 180)
+            w = sp.values[:, 0]
+            r = sp.values[:, 1]
 
-        print('\nSaving the reflectance image (with topographic correction)...')
-        surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
+            # Remove NaN values before interpolation
+            valid_mask = np.isfinite(w) & np.isfinite(r)
+            if np.sum(valid_mask) < 10:
+                raise ValueError(f"Only {np.sum(valid_mask)} valid albedo values found")
+
+            w = w[valid_mask]
+            r = r[valid_mask]
+
+            f = interpolate.interp1d(w, r, bounds_error=False, fill_value='extrapolate')
+            rho_background = f(df['Wvlgth'] * 1E-3)
+        except Exception as e:
+            print(f'\n⚠️  WARNING: Could not process albedo file: {e}')
+            print('    Skipping topographic correction and continuing with flat terrain...')
+            topo = False
+
+        if topo:  # Only continue if albedo file was processed successfully
+            print('\nComputing LUT for rough terrain correction')
+            R = surehyp.atmoCorrection.getDemReflectance(altitMap=elev, tiltMap=slope, wazimMap=wazim,
+                                                          stepAltit=stepAltit, stepTilt=stepTilt,
+                                                          stepWazim=stepWazim, latit=latit,
+                                                          IH2O=0, WV=wv, IO3=IO3, IALT=0, AbO3=o3,
+                                                          doy=doy, zenith=zenith, azimuth=azimuth,
+                                                          satelliteZenith=satelliteZenith,
+                                                          satelliteAzimuth=satelliteAzimuth,
+                                                          L=L, bands=bands, IALBDX=1,
+                                                          rho_background=rho_background)
+
+            print('\nApplying Modified-Minnaert topography correction')
+            R = surehyp.atmoCorrection.MM_topo_correction(R, bands, slope * np.pi / 180,
+                                                           wazim * np.pi / 180, zenith * np.pi / 180,
+                                                           azimuth * np.pi / 180)
+
+            print('\nSaving the reflectance image (with topographic correction)...')
+            surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
         # Fix HDR file for SNAP compatibility
         fix_envi_hdr_for_snap(pathToOutImage + '.hdr',
                               wavelength_file=snap_wavelength_file,
@@ -1643,6 +1806,57 @@ if __name__ == '__main__':
 
         img = envi.open(hdr_path, img_path)
         R = img.load()
+
+        # CRITICAL FIX: Apply scale factor if present in metadata
+        # Reflectance is saved as uint16 with scale factor (typically 100)
+        # Must divide by scale factor to get actual 0-1 reflectance values
+        if 'scale factor' in img.metadata:
+            try:
+                scale_factor_list = img.metadata['scale factor']
+                # Handle both single value and per-band scale factors
+                if isinstance(scale_factor_list, list):
+                    scale_factor = np.array([float(s) for s in scale_factor_list])
+                    # If all values are the same, use a single scalar
+                    if len(np.unique(scale_factor)) == 1:
+                        scale_factor = scale_factor[0]
+                else:
+                    scale_factor = float(scale_factor_list)
+
+                print(f'    Found scale factor in metadata: {scale_factor if np.isscalar(scale_factor) else scale_factor[0]}')
+
+                # Convert to float and apply scale factor
+                R = R.astype(np.float32) / scale_factor
+
+                # Validate result
+                valid_R = R[R > 0]
+                if len(valid_R) > 0:
+                    max_R = np.nanmax(valid_R)
+                    print(f'    Reflectance range after scaling: {np.nanmin(valid_R):.6f} - {max_R:.6f}')
+
+                    # Additional validation
+                    if max_R > 2.0:
+                        print(f'    ⚠️  WARNING: Max reflectance > 2.0 after scale correction')
+                        print(f'    This may indicate incorrect scale factor or data corruption')
+                    elif max_R < 0.001:
+                        print(f'    ⚠️  WARNING: Max reflectance < 0.001 after scale correction')
+                        print(f'    Scale factor may have been applied twice')
+                    else:
+                        print(f'    ✅ Reflectance scale appears correct (0-1 range)')
+            except Exception as e:
+                print(f'    ⚠️  WARNING: Could not apply scale factor: {e}')
+                print(f'    Using data as-is (may be incorrect scale)')
+                R = R.astype(np.float32)
+        else:
+            print('    No scale factor found in metadata')
+            print('    Assuming data is already in correct scale')
+            R = R.astype(np.float32)
+
+            # Validate data scale
+            valid_R = R[R > 0]
+            if len(valid_R) > 0:
+                max_R = np.nanmax(valid_R)
+                if max_R > 2.0:
+                    print(f'    ⚠️  WARNING: Max value {max_R:.2f} suggests incorrect scale')
 
         # Try to get wavelengths from HDR, or fall back to spectral_info.txt
         if 'wavelength' in img.metadata:
