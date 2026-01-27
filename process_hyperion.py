@@ -1111,6 +1111,10 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
 
             print('\nSaving the reflectance image (with topographic correction)...')
             surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
+        else:
+            # Topographic correction failed, save flat-terrain reflectance
+            print('\nSaving the reflectance image (flat terrain - topo correction skipped)...')
+            surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
         # Fix HDR file for SNAP compatibility
         fix_envi_hdr_for_snap(pathToOutImage + '.hdr',
                               wavelength_file=snap_wavelength_file,
