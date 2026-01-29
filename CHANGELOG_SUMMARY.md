@@ -79,7 +79,7 @@ This changelog summarizes all modifications, bug fixes, and improvements made to
   - Only apply wavelength removal to final reflectance files
   - Added fallback loader from `*_spectral_info.txt` files
 - **Impact:** Atmospheric correction no longer fails when reading radiance data
-- **Reference:** [docs/changelogs/WAVELENGTH_FIX_README.md](docs/changelogs/WAVELENGTH_FIX_README.md)
+- **Reference:** See Wavelength KeyError fix in this changelog (v2.0.0)
 
 **Fixed: DEM Elevation Retrieval from Google Earth Engine**
 - **Issue:** `ValueError: Could not retrieve elevation data from USGS/SRTMGL1_003`
@@ -93,7 +93,7 @@ This changelog summarizes all modifications, bug fixes, and improvements made to
   - Fallback to default elevation (500m) if GEE fails
   - Better error handling and debugging output
 - **Impact:** Atmospheric correction continues even if GEE times out or fails
-- **Reference:** [docs/changelogs/DEM_FIX_README.md](docs/changelogs/DEM_FIX_README.md)
+- **Reference:** See DEM elevation fix in this changelog (v2.0.0)
 
 ---
 
@@ -129,7 +129,7 @@ This changelog summarizes all modifications, bug fixes, and improvements made to
   # AFTER:  wavelengths.append(parts[1].strip())  # Gets "426.82"
   ```
 - **Impact:** Wavelength metadata now correctly displayed in SNAP
-- **Reference:** [docs/changelogs/BUGFIX_SUMMARY.md](docs/changelogs/BUGFIX_SUMMARY.md)
+- **Reference:** See Wavelength parser fix in this changelog (v1.5.0)
 
 ---
 
@@ -425,7 +425,7 @@ print(f"Good bands: {np.sum(good_bands)}/196")
 
 **Full Documentation:** [docs/README.md](docs/README.md)
 
-**Quick Start:** [docs/guides/QUICK_START_GUIDE.md](docs/guides/QUICK_START_GUIDE.md)
+**Project Overview:** [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md)
 
 **Troubleshooting:** [docs/guides/Preprocessing_Diagnostic_Report.md](docs/guides/Preprocessing_Diagnostic_Report.md)
 
@@ -433,9 +433,6 @@ print(f"Good bands: {np.sum(good_bands)}/196")
 - [MODIFICATIONS_REPORT.md](docs/changelogs/MODIFICATIONS_REPORT.md) - Comprehensive modifications (Nov 2025)
 - [PREPROCESSING_FIXES_SUMMARY.md](docs/changelogs/PREPROCESSING_FIXES_SUMMARY.md) - Preprocessing fixes (Dec 2025)
 - [CHANGELOG.md](docs/changelogs/CHANGELOG.md) - Recent bug fixes (Jan 2026)
-- [WAVELENGTH_FIX_README.md](docs/changelogs/WAVELENGTH_FIX_README.md) - Wavelength error fix
-- [DEM_FIX_README.md](docs/changelogs/DEM_FIX_README.md) - DEM retrieval fix
-- [BUGFIX_SUMMARY.md](docs/changelogs/BUGFIX_SUMMARY.md) - Wavelength parser fix
 - [SNAP_WAVELENGTH_GUIDE.md](docs/guides/SNAP_WAVELENGTH_GUIDE.md) - SNAP configuration
 
 ---
@@ -460,12 +457,12 @@ This package uses SMARTS (Simple Model of the Atmospheric Radiative Transfer of 
 ## Support
 
 For issues or questions:
-1. Check the [Quick Start Guide](docs/guides/QUICK_START_GUIDE.md)
+1. Check the [Project Overview](docs/PROJECT_OVERVIEW.md)
 2. Review the [Preprocessing Diagnostic Report](docs/guides/Preprocessing_Diagnostic_Report.md)
 3. Consult the detailed changelogs in [docs/changelogs/](docs/changelogs/)
 4. Refer to original SUREHYP documentation for general usage
 
 ---
 
-**Last Updated:** 2026-01-13
+**Last Updated:** 2026-01-29
 **Version:** 2.0.0 (Unreleased)
