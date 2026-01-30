@@ -1182,12 +1182,15 @@ def create_rgb_quicklook(R, bands, output_path, stretch_percentile=2):
     rgb = np.clip(rgb, 0, 1)
 
     # Save image
-    plt.figure(figsize=(10, 10))
+    fig_height = 10
+    rows, cols = rgb.shape[:2]
+    fig_width = max(fig_height * cols / rows, 2)
+    plt.figure(figsize=(fig_width, fig_height))
     plt.imshow(rgb)
     plt.axis('off')
     plt.title('RGB Quicklook (R: 660nm, G: 550nm, B: 480nm)')
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
     print(f'    RGB quicklook saved to: {output_path}')
@@ -1239,12 +1242,15 @@ def create_false_color_quicklook(R, bands, output_path, stretch_percentile=2):
     rgb = np.clip(rgb, 0, 1)
 
     # Save image
-    plt.figure(figsize=(10, 10))
+    fig_height = 10
+    rows, cols = rgb.shape[:2]
+    fig_width = max(fig_height * cols / rows, 2)
+    plt.figure(figsize=(fig_width, fig_height))
     plt.imshow(rgb)
     plt.axis('off')
     plt.title('False Color Composite (NIR-R-G)')
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
     print(f'    False color quicklook saved to: {output_path}')
@@ -1330,7 +1336,7 @@ def plot_sample_spectra(R, bands, output_path, n_samples=5):
     plt.xlim([400, 2500])
     plt.ylim([0, None])
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
     print(f'    Sample spectra plot saved to: {output_path}')
@@ -1429,7 +1435,7 @@ def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus
 
     # Save figure
     output_path = quicklooks_dir + fname + '_valid_pixels.png'
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
     print(f'    Valid pixel visualization saved to: {output_path}')
@@ -1493,7 +1499,7 @@ def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus
 
     # Save detailed statistics
     output_path_detail = quicklooks_dir + fname + '_valid_pixels_stats.png'
-    plt.savefig(output_path_detail, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path_detail, dpi=300, bbox_inches='tight')
     plt.close()
 
     print(f'    Valid pixel statistics saved to: {output_path_detail}')
@@ -1556,13 +1562,16 @@ def post_processing(R, bands, pathOut, fname):
     print(f'    NDVI array saved to: {pathOut + fname}_NDVI.npy')
 
     # Plot NDVI
-    plt.figure(figsize=(10, 10))
+    fig_height = 10
+    rows, cols = ndvi.shape[:2]
+    fig_width = max(fig_height * cols / rows, 2) + 1.5  # extra width for colorbar
+    plt.figure(figsize=(fig_width, fig_height))
     im = plt.imshow(ndvi, cmap='RdYlGn', vmin=-0.2, vmax=0.8)
     plt.colorbar(im, label='NDVI', shrink=0.8)
     plt.title('Normalized Difference Vegetation Index (NDVI)')
     plt.axis('off')
     plt.tight_layout()
-    plt.savefig(quicklooks_dir + fname + '_NDVI.png', dpi=150, bbox_inches='tight')
+    plt.savefig(quicklooks_dir + fname + '_NDVI.png', dpi=300, bbox_inches='tight')
     plt.close()
     print(f'    NDVI plot saved to: {quicklooks_dir + fname}_NDVI.png')
 
