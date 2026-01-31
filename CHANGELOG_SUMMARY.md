@@ -15,9 +15,43 @@ This changelog summarizes all modifications, bug fixes, and improvements made to
 
 ## Version History
 
-### [Unreleased] - 2026-01-13
+### [Unreleased] - 2026-01-31
 
-#### 🐛 Bug Fixes
+#### Improvements
+
+**Re-enabled Cloud/Shadow Detection (Step 6)**
+- **Issue:** Cloud detection was bypassed (`clearview = np.ones(...)`) because the installed surehyp package (v1.0.1.1) lacked `cloudAndShadowsDetection`
+- **Solution:** After reinstalling the local package in dev mode (`pip install -e .`), replaced the bypass with the actual function call from `example.py`
+- **Changes:**
+  - Step 6 now calls `surehyp.atmoCorrection.cloudAndShadowsDetection()` with slope/wazim from DEM
+  - Step 8 re-enabled: `L[clearview == 0] = 0` masks non-clearview pixels
+  - Cloud and shadow masks now saved as `*_cloud_mask.npy` and `*_shadows_mask.npy`
+- **Result:** Detected 3,681 cloud pixels and 1,326 shadow pixels in test image (EO1H2020342013284110KF)
+- **Files Modified:** `process_hyperion.py` (lines 892-901, 1125-1129, 1932-1935)
+
+**Fixed cirrusRemoval() Return Value Mismatch (Step 9)**
+- **Issue:** `cirrusRemoval()` returns only the corrected radiance array, but the script expected `(L, cirrus_cloudMask)`
+- **Root Cause:** Pre-existing bug, never triggered before because step 9 was always reached via a different execution path
+- **Solution:** Fixed unpacking to single return value; cirrus mask now derived from the 1380nm band (same threshold logic as inside the function)
+- **Files Modified:** `process_hyperion.py` (lines 904-911)
+
+#### Bug Fixes
+
+**Fixed numpy deprecation in atmoCorrection.py**
+- **Issue:** `np.float` removed in newer numpy versions, causing `AttributeError` in `getDemReflectance()`
+- **Solution:** Replaced 5 occurrences of `.astype(np.float)` with `.astype(float)`
+- **Files Modified:** `src/surehyp/atmoCorrection.py` (lines 1396-1402)
+
+**Fixed Unicode encoding errors (cp1252)**
+- **Issue:** Emoji characters in print statements caused `UnicodeEncodeError` on Windows (cp1252 codepage)
+- **Solution:** Replaced all emoji with ASCII equivalents across `process_hyperion.py`
+- **Files Modified:** `process_hyperion.py` (19 locations)
+
+---
+
+### [Previous Unreleased] - 2026-01-13
+
+#### Bug Fixes
 
 **Critical: Fixed "Zero Valid Pixels" Error**
 - **Issue:** Script crashed during post-processing with `ValueError: zero-size array to reduction operation minimum`
@@ -213,6 +247,7 @@ This changelog summarizes all modifications, bug fixes, and improvements made to
 |------|---------------|-------------|
 | `process_hyperion.py` | 1500+ | Main processing script with all compatibility fixes |
 | `src/surehyp/preprocess.py` | 1 (line 188) | Critical bad band removal fix |
+| `src/surehyp/atmoCorrection.py` | 5 (lines 1396-1402) | np.float deprecation fix |
 | Helper scripts | New | `add_wavelengths_to_hdr.py` for manual HDR updates |
 
 ### New Functions Added
@@ -254,6 +289,10 @@ This changelog summarizes all modifications, bug fixes, and improvements made to
 | 13 | DEM elevation retrieval | ✅ Fixed | Robust with fallbacks |
 | 14 | Wavelength parser bug | ✅ Fixed | Correct wavelengths in SNAP |
 | 15 | Zero valid pixels error | ✅ Fixed | Post-processing completes |
+| 16 | Cloud detection bypassed | ✅ Fixed | Cloud/shadow masks generated |
+| 17 | cirrusRemoval() return mismatch | ✅ Fixed | Cirrus mask derived correctly |
+| 18 | np.float deprecated in numpy | ✅ Fixed | Topographic correction works |
+| 19 | Unicode emoji on Windows cp1252 | ✅ Fixed | No encoding errors on Windows |
 
 ### Output Files Generated
 
@@ -268,6 +307,8 @@ After successful processing, the following files are created:
 **Masks:**
 - `*_reflectance_good_bands_mask.npy` - Good bands mask (water vapor excluded)
 - `*_reflectance_clearview_mask.npy` - Cloud-free pixel mask
+- `*_reflectance_cloud_mask.npy` - Cloud pixel mask
+- `*_reflectance_shadows_mask.npy` - Shadow pixel mask
 - `*_reflectance_cirrus_mask.npy` - Cirrus cloud mask
 - `*_valid_pixels_mask.npy` - Valid pixel mask
 
@@ -464,5 +505,5 @@ For issues or questions:
 
 ---
 
-**Last Updated:** 2026-01-29
-**Version:** 2.0.0 (Unreleased)
+**Last Updated:** 2026-01-31
+**Version:** 2.1.0 (Unreleased)
