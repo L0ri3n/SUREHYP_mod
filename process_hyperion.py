@@ -1116,6 +1116,56 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
                                                            wazim * np.pi / 180, zenith * np.pi / 180,
                                                            azimuth * np.pi / 180)
 
+            # --------------------------------------------------------
+            # CRITICAL: Apply corrections to topo-corrected reflectance
+            # getDemReflectance/MM_topo_correction produce a new R that
+            # also has extreme values in water absorption bands (where
+            # atmospheric transmittance ~ 0 causes division by near-zero).
+            # The earlier corrections (lines 964-1058) were applied to the
+            # flat-terrain R which was overwritten - must re-apply here.
+            # --------------------------------------------------------
+            print('\n--- Correcting topo-corrected reflectance ---')
+
+            # Bad band removal using MAD (Median Absolute Deviation)
+            max_per_band_t = np.max(R, axis=(0,1))
+            median_max_t = np.median(max_per_band_t)
+            mad_t = np.median(np.abs(max_per_band_t - median_max_t))
+            bad_threshold_t = median_max_t + (10 * mad_t * 1.4826)
+            bad_idx_t = np.where(max_per_band_t > bad_threshold_t)[0]
+            if len(bad_idx_t) > 0:
+                print(f'  Masking {len(bad_idx_t)} bad bands in topo-corrected R')
+                for idx in bad_idx_t[:10]:
+                    print(f'    Band #{idx+1} ({bands[idx]:.2f} nm): max = {max_per_band_t[idx]:.2e}')
+                if len(bad_idx_t) > 10:
+                    print(f'    ... and {len(bad_idx_t)-10} more')
+                R[:, :, bad_idx_t] = np.nan
+            else:
+                print(f'  No extreme bad bands detected in topo R')
+
+            # Scale correction from clean data
+            valid_R_t = R[np.isfinite(R) & (R > 0)]
+            if len(valid_R_t) > 0:
+                p99_t = np.percentile(valid_R_t, 99)
+                print(f'  Topo R 99th percentile: {p99_t:.6e}')
+                if p99_t > 100:
+                    if p99_t > 5000:
+                        target_t = 8000
+                    else:
+                        target_t = 0.8
+                    correction_factor_t = p99_t / target_t
+                    print(f'  Scale correction: R = R / {correction_factor_t:.2f}')
+                    R = R / correction_factor_t
+                else:
+                    print(f'  Scale is correct - no correction needed')
+
+            # Post-correction fixes
+            print('\n  Clipping reflectance outliers...')
+            R = clip_reflectance_outliers(R, percentile=99.5)
+            print('\n  Masking water vapor absorption bands...')
+            R, good_bands_mask = mask_water_vapor_bands(R, bands)
+            print('\n  Smoothing VNIR-SWIR detector transition...')
+            R = normalize_vnir_swir_transition(R, bands, transition_wavelength=920)
+
             print('\nSaving the reflectance image (with topographic correction)...')
             surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
         else:
@@ -1913,6 +1963,16 @@ if __name__ == '__main__':
                     f"Tried: {spectral_info_paths}\n"
                     f"The reflectance file may have been processed without wavelength field removal."
                 )
+
+        # Apply post-corrections to cached reflectance data
+        # The saved uint16 data may still have residual bad bands (clipped at 65535/scaleFactor)
+        # and missing water vapor masking if it was saved from an earlier code version
+        print('\n--- Applying post-corrections to loaded reflectance ---')
+        R = clip_reflectance_outliers(R, percentile=99.5)
+        R, _ = mask_water_vapor_bands(R, bands)
+        R = normalize_vnir_swir_transition(R, bands, transition_wavelength=920)
+        print('--- Post-corrections complete ---')
+
     else:
         pathToReflectanceImage, R, bands = atmospheric_correction(
             pathToRadianceImage,
