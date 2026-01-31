@@ -1393,13 +1393,13 @@ def getDemReflectance(altitMap,tiltMap,wazimMap,stepAltit,stepTilt,stepWazim,lat
         df=runSMARTS(ALTIT=xv[i,0,0],ITILT='1',TILT=0,WAZIM=0,LATIT=latit,IMASS=0,ZENITH=np.abs(zenith),AZIM=azimuth,SUNCOR=get_SUNCOR(doy),IH2O=IH2O,WV=WV,IO3=IO3,IALT=IALT,AbO3=AbO3,IALBDX=1,RHOX=0.2)
         df_gs=runSMARTS(ALTIT=xv[i,0,0],ITILT='1',TILT=0,WAZIM=0,LATIT=0,IMASS=0,SUNCOR=get_SUNCOR(doy),ITURB=5,ZENITH=np.abs(satelliteZenith),AZIM=np.abs(satelliteAzimuth),IH2O=IH2O,WV=WV,IO3=IO3,IALT=IALT,AbO3=AbO3,IALBDX=1,RHOX=0.2)
 
-        E=df['Extraterrestrial_spectrm'].astype(np.float)
-        T_sg=df['Direct_rad_transmittance'].astype(np.float)
-        T_gs=df_gs['Direct_rad_transmittance'].astype(np.float)
+        E=df['Extraterrestrial_spectrm'].astype(float)
+        T_sg=df['Direct_rad_transmittance'].astype(float)
+        T_gs=df_gs['Direct_rad_transmittance'].astype(float)
         try:
-            Dft=df['Difuse_tilted_irradiance'].astype(np.float)
+            Dft=df['Difuse_tilted_irradiance'].astype(float)
         except:
-            Dft=df['Total_Diffuse_tilt_irrad'].astype(np.float)
+            Dft=df['Total_Diffuse_tilt_irrad'].astype(float)
 
         for j in tqdm(np.arange(xv.shape[1]),desc='TILTS '):
             for k in tqdm(np.arange(xv.shape[2]),desc='WAZIMS'):

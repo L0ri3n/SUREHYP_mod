@@ -1,0 +1,12 @@
+LICENSE
+README.md
+setup.py
+src/surehyp/__init__.py
+src/surehyp/atmoCorrection.py
+src/surehyp/preprocess.py
+src/surehyp/various.py
+src/surehyp.egg-info/PKG-INFO
+src/surehyp.egg-info/SOURCES.txt
+src/surehyp.egg-info/dependency_links.txt
+src/surehyp.egg-info/requires.txt
+src/surehyp.egg-info/top_level.txt

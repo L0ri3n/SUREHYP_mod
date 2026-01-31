@@ -1,3 +1,47 @@
+Metadata-Version: 2.4
+Name: surehyp
+Version: 1.0.1.2
+Summary: This package was designed to obtain desmiled, destriped and georeferenced reflectance images from Hyperion imagery.
+Author: Thomas Miraglio
+Author-email: tmiragli@mail.ubc.ca
+Project-URL: Bug Reports, https://github.com/tmiraglio/SUREHYP/issues
+Project-URL: Source, https://github.com/tmiraglio/SUREHYP/
+Keywords: hyperspectral,atmospheric correction,hyperion,remote sensing
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Topic :: Scientific/Engineering :: Image Processing
+Classifier: License :: OSI Approved :: GNU General Public License v3 (GPLv3)
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.6
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3 :: Only
+Requires-Python: >=3.6, <3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: earthengine-api
+Requires-Dist: geetools
+Requires-Dist: matplotlib
+Requires-Dist: spectral
+Requires-Dist: scipy
+Requires-Dist: pandas
+Requires-Dist: opencv-python
+Requires-Dist: scikit-learn
+Requires-Dist: tqdm
+Requires-Dist: scikit-image
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: keywords
+Dynamic: license-file
+Dynamic: project-url
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
 # SUREHYP
 ## Surface Reflectance from Hyperion: a Python package to preprocess Hyperion imagery and retrieve surface reflectance
 

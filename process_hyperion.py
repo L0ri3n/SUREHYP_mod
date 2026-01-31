@@ -575,8 +575,8 @@ def mask_water_vapor_bands(R, bands):
     """
     # Define water vapor absorption regions (nm)
     water_bands = [
-        (1350, 1450),  # 1.4 μm water band
-        (1800, 1950),  # 1.9 μm water band
+        (1350, 1450),  # 1.4 um water band
+        (1800, 1950),  # 1.9 um water band
     ]
 
     # Create mask
@@ -649,7 +649,7 @@ def clip_reflectance_outliers(R, percentile=99.5):
 
     if n_bad_bands > 0:
         bad_bands_idx = np.where(bad_bands_mask)[0]
-        print(f'    ⚠️  WARNING: Found {n_bad_bands} bands with extreme max values (bad calibration)')
+        print(f'    WARNING: Found {n_bad_bands} bands with extreme max values (bad calibration)')
         print(f'    These bands will be masked (set to NaN):')
         for idx in bad_bands_idx[:10]:  # Show first 10
             print(f'      Band {idx+1}: max = {max_per_band[idx]:.2f}')
@@ -692,12 +692,12 @@ def clip_reflectance_outliers(R, percentile=99.5):
     if len(final_valid) > 0:
         final_max = np.nanmax(final_valid)
         final_mean = np.nanmean(final_valid)
-        print(f'    ✅ After clipping: max = {final_max:.4f}, mean = {final_mean:.4f}')
+        print(f'    [OK] After clipping: max = {final_max:.4f}, mean = {final_mean:.4f}')
 
         # Warn if still suspicious
         expected_max = 10000 if median_max > 100 else 1.0
         if final_max > expected_max * 1.5:
-            print(f'    ⚠️  WARNING: Max value still high ({final_max:.2f} > {expected_max*1.5:.2f})')
+            print(f'    WARNING: Max value still high ({final_max:.2f} > {expected_max*1.5:.2f})')
             print(f'    Consider reprocessing or checking bad band removal')
 
     return R
@@ -890,18 +890,25 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
             wazim = None
 
     # Cloud/shadow detection
-    print('\n[6/12] Cloud/shadow detection (skipped - using all pixels as clearview)')
-    clearview = np.ones(L.shape[:2], dtype=np.uint8)
-    print('    All pixels marked as clearview')
+    print('\n[6/12] Cloud/shadow detection')
+    clearview, clouds, shadows = surehyp.atmoCorrection.cloudAndShadowsDetection(
+        bands, L, latit, doy, satelliteZenith, zenith, azimuth, slope, wazim)
+    print(f'    Clearview pixels: {np.sum(clearview == 1)}, Cloud pixels: {np.sum(clouds == 1)}, Shadow pixels: {np.sum(shadows == 1)}')
 
     print('\n[7/12] Get haze spectrum (dark object subtraction)')
     L, Lhaze = surehyp.atmoCorrection.darkObjectDehazing(L, bands)
 
-    print('\n[8/12] Mask non-clearview pixels (skipped)')
-    # L[clearview == 0] = 0  # Skipped since all pixels are clearview
+    print('\n[8/12] Mask non-clearview pixels')
+    L[clearview == 0] = 0
 
     print('\n[9/12] Removal of thin cirrus')
-    L, cirrus_cloudMask = surehyp.atmoCorrection.cirrusRemoval(bands, L, latit, doy, satelliteZenith, zenith, azimuth)
+    # Generate cirrus mask from 1380nm band before correction (same logic as inside cirrusRemoval)
+    idx_1380 = np.argmin(np.abs(bands - 1380))
+    factor_toa = surehyp.atmoCorrection.getTOAreflectanceFactor(bands, latit, doy, satelliteZenith, zenith, azimuth).astype(np.float32)
+    Rcirrus_check = (factor_toa * L)[:, :, idx_1380]
+    cirrus_cloudMask = (Rcirrus_check >= 1).astype(np.uint8)
+    print(f'    Cirrus-affected pixels: {np.sum(cirrus_cloudMask == 1)}')
+    L = surehyp.atmoCorrection.cirrusRemoval(bands, L, latit, doy, satelliteZenith, zenith, azimuth)
 
     print('\n[10/12] Get average elevation of the scene from GEE')
     # Use fixed version that handles SRTM as Image (not ImageCollection)
@@ -971,7 +978,7 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
     bad_bands_idx = np.where(max_per_band > bad_band_threshold)[0]
 
     if len(bad_bands_idx) > 0:
-        print(f'\n  🎯 STEP 1: Found {len(bad_bands_idx)} bad bands to remove:')
+        print(f'\n  [*] STEP 1: Found {len(bad_bands_idx)} bad bands to remove:')
         for idx in bad_bands_idx[:10]:
             print(f'    Band #{idx+1} ({bands[idx]:.2f} nm): max = {max_per_band[idx]:.2e}')
         if len(bad_bands_idx) > 10:
@@ -980,7 +987,7 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
         print(f'  Masking these bands (NaN)...')
         R[:, :, bad_bands_idx] = np.nan
     else:
-        print(f'\n  ✅ No extreme bad bands detected')
+        print(f'\n  [OK] No extreme bad bands detected')
 
     # Step 2: Calculate scale correction from CLEAN data only
     valid_R = R[np.isfinite(R) & (R > 0)]
@@ -989,7 +996,7 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
         p99 = np.percentile(valid_R, 99)
         p50 = np.median(valid_R)
 
-        print(f'\n  🎯 STEP 2: Check scale using clean data:')
+        print(f'\n  [*] STEP 2: Check scale using clean data:')
         print(f'    Min:    {np.min(valid_R):.6e}')
         print(f'    Median: {p50:.6e}')
         print(f'    99th %: {p99:.6e}')
@@ -997,7 +1004,7 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
 
         # Determine if correction needed based on 99th percentile
         if p99 > 100:
-            print(f'\n  🚨 CRITICAL: Scale is wrong!')
+            print(f'\n  [!] CRITICAL: Scale is wrong!')
             print(f'     Expected 99th %: ~0.8 or ~8000')
             print(f'     Actual 99th %: {p99:.0f}')
 
@@ -1019,14 +1026,14 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
 
             # Verify
             valid_fixed = R[np.isfinite(R) & (R > 0)]
-            print(f'\n  ✅ After correction:')
+            print(f'\n  [OK] After correction:')
             print(f'    Min:    {np.min(valid_fixed):.6f}')
             print(f'    Median: {np.median(valid_fixed):.6f}')
             print(f'    99th %: {np.percentile(valid_fixed, 99):.6f}')
             print(f'    Max:    {np.max(valid_fixed):.6f}')
 
         else:
-            print(f'\n  ✅ Scale is correct - no correction needed')
+            print(f'\n  [OK] Scale is correct - no correction needed')
 
     print('=' * 60)
 
@@ -1088,7 +1095,7 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
             f = interpolate.interp1d(w, r, bounds_error=False, fill_value='extrapolate')
             rho_background = f(df['Wvlgth'] * 1E-3)
         except Exception as e:
-            print(f'\n⚠️  WARNING: Could not process albedo file: {e}')
+            print(f'\nWARNING: Could not process albedo file: {e}')
             print('    Skipping topographic correction and continuing with flat terrain...')
             topo = False
 
@@ -1123,6 +1130,8 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
     # Save masks
     pathOutDir = os.path.dirname(pathToOutImage) + '/'
     np.save(pathOutDir + os.path.basename(pathToOutImage) + '_clearview_mask.npy', clearview)
+    np.save(pathOutDir + os.path.basename(pathToOutImage) + '_cloud_mask.npy', clouds)
+    np.save(pathOutDir + os.path.basename(pathToOutImage) + '_shadows_mask.npy', shadows)
     np.save(pathOutDir + os.path.basename(pathToOutImage) + '_cirrus_mask.npy', cirrus_cloudMask)
     np.save(pathOutDir + os.path.basename(pathToOutImage) + '_good_bands_mask.npy', good_bands_mask)
     print(f'    Saved good bands mask to: {pathOutDir + os.path.basename(pathToOutImage)}_good_bands_mask.npy')
@@ -1848,15 +1857,15 @@ if __name__ == '__main__':
 
                     # Additional validation
                     if max_R > 2.0:
-                        print(f'    ⚠️  WARNING: Max reflectance > 2.0 after scale correction')
+                        print(f'    WARNING: Max reflectance > 2.0 after scale correction')
                         print(f'    This may indicate incorrect scale factor or data corruption')
                     elif max_R < 0.001:
-                        print(f'    ⚠️  WARNING: Max reflectance < 0.001 after scale correction')
+                        print(f'    WARNING: Max reflectance < 0.001 after scale correction')
                         print(f'    Scale factor may have been applied twice')
                     else:
-                        print(f'    ✅ Reflectance scale appears correct (0-1 range)')
+                        print(f'    [OK] Reflectance scale appears correct (0-1 range)')
             except Exception as e:
-                print(f'    ⚠️  WARNING: Could not apply scale factor: {e}')
+                print(f'    WARNING: Could not apply scale factor: {e}')
                 print(f'    Using data as-is (may be incorrect scale)')
                 R = R.astype(np.float32)
         else:
@@ -1869,7 +1878,7 @@ if __name__ == '__main__':
             if len(valid_R) > 0:
                 max_R = np.nanmax(valid_R)
                 if max_R > 2.0:
-                    print(f'    ⚠️  WARNING: Max value {max_R:.2f} suggests incorrect scale')
+                    print(f'    WARNING: Max value {max_R:.2f} suggests incorrect scale')
 
         # Try to get wavelengths from HDR, or fall back to spectral_info.txt
         if 'wavelength' in img.metadata:
@@ -1927,6 +1936,8 @@ if __name__ == '__main__':
     print(f'  - Preprocessed radiance: {pathOut + nameOut_radiance}.img')
     print(f'  - Surface reflectance:   {pathOut + nameOut_reflectance}.img')
     print(f'  - Clearview mask:        {pathOut + nameOut_reflectance}_clearview_mask.npy')
+    print(f'  - Cloud mask:            {pathOut + nameOut_reflectance}_cloud_mask.npy')
+    print(f'  - Shadow mask:           {pathOut + nameOut_reflectance}_shadows_mask.npy')
     print(f'  - Cirrus mask:           {pathOut + nameOut_reflectance}_cirrus_mask.npy')
     print(f'  - NDVI:                  {pathOut + fname}_NDVI.npy')
     print(f'  - Statistics:            {pathOut + fname}_statistics.txt')

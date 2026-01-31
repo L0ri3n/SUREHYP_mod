@@ -1,0 +1,11 @@
+numpy
+earthengine-api
+geetools
+matplotlib
+spectral
+scipy
+pandas
+opencv-python
+scikit-learn
+tqdm
+scikit-image
