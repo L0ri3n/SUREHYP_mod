@@ -600,10 +600,11 @@ def mask_water_vapor_bands(R, bands):
 def clip_reflectance_outliers(R, percentile=99.5):
     """
     Clip extreme reflectance outliers that indicate preprocessing errors.
-    Standard reflectance should be 0-1.0 (or 0-10,000 if scaled).
 
-    This function now also identifies and masks bands with consistently extreme values,
-    which typically indicate bad bands that weren't properly removed during preprocessing.
+    Handles three reflectance scales automatically:
+    - 0-1 (fraction): computeLtoR may return this with certain SMARTS configs
+    - 0-100 (percent): SUREHYP standard internal scale (writeAlbedoFile expects this)
+    - 0-10000 (scaled integer): sometimes used for storage
 
     Parameters:
     -----------
@@ -622,26 +623,35 @@ def clip_reflectance_outliers(R, percentile=99.5):
         print('    Warning: No valid reflectance values found')
         return R
 
-    # First, check for bands with extreme maximum values (bad bands)
-    # These indicate uncalibrated or miscalibrated bands
+    # Check for bands with extreme maximum values (bad bands)
     max_per_band = np.nanmax(R, axis=(0, 1))
-
-    # Physical maximum reflectance is ~1.0 (or 10,000 if scaled by 10000)
-    # But we'll be conservative - anything > 2.0 in unscaled or > 20000 in scaled is definitely wrong
-    bad_band_threshold_unscaled = 2.0
-    bad_band_threshold_scaled = 20000
-
-    # Detect if data appears to be scaled
     median_max = np.median(max_per_band[max_per_band > 0])
 
-    if median_max > 100:
-        # Likely scaled data (10000x or similar)
-        bad_band_threshold = bad_band_threshold_scaled
-        print(f'    Detected scaled reflectance (median max: {median_max:.0f})')
+    # Detect reflectance scale and set appropriate thresholds
+    # SUREHYP uses 0-100 (percent) internally: writeAlbedoFile does rho*1e-2,
+    # saveRimage multiplies by scaleFactor=100 before uint16 storage
+    if median_max > 1000:
+        # 0-10000 scaled reflectance
+        physical_max = 10000
+        bad_band_threshold = 20000
+        scale_name = '0-10000'
+    elif median_max > 10:
+        # 0-100 percent reflectance (SUREHYP standard)
+        physical_max = 100
+        bad_band_threshold = 200
+        scale_name = '0-100 percent'
+    elif median_max > 0.1:
+        # 0-1 fraction reflectance
+        physical_max = 1.0
+        bad_band_threshold = 2.0
+        scale_name = '0-1 fraction'
     else:
-        # Likely unscaled (0-1 range)
-        bad_band_threshold = bad_band_threshold_unscaled
-        print(f'    Detected unscaled reflectance (median max: {median_max:.4f})')
+        # Very small values - use relative threshold
+        physical_max = median_max * 10
+        bad_band_threshold = median_max * 40
+        scale_name = f'small (median_max={median_max:.2e})'
+
+    print(f'    Detected reflectance scale: {scale_name} (median band max: {median_max:.4f})')
 
     # Find bands exceeding threshold
     bad_bands_mask = max_per_band > bad_band_threshold
@@ -651,34 +661,24 @@ def clip_reflectance_outliers(R, percentile=99.5):
         bad_bands_idx = np.where(bad_bands_mask)[0]
         print(f'    WARNING: Found {n_bad_bands} bands with extreme max values (bad calibration)')
         print(f'    These bands will be masked (set to NaN):')
-        for idx in bad_bands_idx[:10]:  # Show first 10
+        for idx in bad_bands_idx[:10]:
             print(f'      Band {idx+1}: max = {max_per_band[idx]:.2f}')
         if n_bad_bands > 10:
             print(f'      ... and {n_bad_bands-10} more')
 
-        # Mask these bands entirely
         R[:, :, bad_bands_idx] = np.nan
 
-        # Recompute valid pixels after masking bad bands
         valid_R = R[R > 0]
         if len(valid_R) == 0:
             print('    ERROR: No valid data remaining after bad band removal!')
             return R
 
-    # Now apply percentile-based clipping to remaining data
+    # Percentile-based clipping: use the lesser of percentile threshold and physical max
     threshold = np.nanpercentile(valid_R, percentile)
+    max_allowed = min(threshold, physical_max)
 
-    # Set maximum allowed based on data scale
-    # Typical reflectance should be < 1.0 (or 10,000 if scaled)
-    if threshold > 15000:  # Likely a 10000-scaled reflectance
-        max_allowed = 10000
-        print(f'    Setting max allowed to {max_allowed} (scaled reflectance)')
-    elif threshold > 1.5:  # Unscaled reflectance but high
-        max_allowed = 1.0
-        print(f'    Setting max allowed to {max_allowed} (physical maximum)')
-    else:
-        max_allowed = threshold
-        print(f'    Using {percentile}th percentile as threshold: {threshold:.4f}')
+    print(f'    {percentile}th percentile: {threshold:.4f}, physical max: {physical_max:.1f}')
+    print(f'    Clipping threshold: {max_allowed:.4f}')
 
     n_outliers = np.sum(R > max_allowed)
     if n_outliers > 0:
@@ -693,12 +693,6 @@ def clip_reflectance_outliers(R, percentile=99.5):
         final_max = np.nanmax(final_valid)
         final_mean = np.nanmean(final_valid)
         print(f'    [OK] After clipping: max = {final_max:.4f}, mean = {final_mean:.4f}')
-
-        # Warn if still suspicious
-        expected_max = 10000 if median_max > 100 else 1.0
-        if final_max > expected_max * 1.5:
-            print(f'    WARNING: Max value still high ({final_max:.2f} > {expected_max*1.5:.2f})')
-            print(f'    Consider reprocessing or checking bad band removal')
 
     return R
 
@@ -989,82 +983,9 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
     else:
         print(f'\n  [OK] No extreme bad bands detected')
 
-    # Step 2: Calculate scale correction from CLEAN data only
-    valid_R = R[np.isfinite(R) & (R > 0)]
-
-    if len(valid_R) > 0:
-        p99 = np.percentile(valid_R, 99)
-        p50 = np.median(valid_R)
-
-        print(f'\n  [*] STEP 2: Check scale using clean data:')
-        print(f'    Min:    {np.min(valid_R):.6e}')
-        print(f'    Median: {p50:.6e}')
-        print(f'    99th %: {p99:.6e}')
-        print(f'    Max:    {np.max(valid_R):.6e}')
-
-        # Determine if correction needed based on 99th percentile
-        if p99 > 100:
-            print(f'\n  [!] CRITICAL: Scale is wrong!')
-            print(f'     Expected 99th %: ~0.8 or ~8000')
-            print(f'     Actual 99th %: {p99:.0f}')
-
-            # Smart target detection
-            if p99 > 5000:
-                target = 8000  # 10000-scale
-                scale_name = "0-10000"
-            else:
-                target = 0.8   # 0-1 scale
-                scale_name = "0-1"
-
-            correction_factor = p99 / target
-
-            print(f'     Target scale: {scale_name}')
-            print(f'     Correction factor: {correction_factor:.2f}')
-            print(f'\n  Applying correction: R = R / {correction_factor:.2f}')
-
-            R = R / correction_factor
-
-            # Verify
-            valid_fixed = R[np.isfinite(R) & (R > 0)]
-            print(f'\n  [OK] After correction:')
-            print(f'    Min:    {np.min(valid_fixed):.6f}')
-            print(f'    Median: {np.median(valid_fixed):.6f}')
-            print(f'    99th %: {np.percentile(valid_fixed, 99):.6f}')
-            print(f'    Max:    {np.max(valid_fixed):.6f}')
-
-        else:
-            print(f'\n  [OK] Scale is correct - no correction needed')
-
     print('=' * 60)
 
-    # ============================================================
-    # APPLY PREPROCESSING FIXES FOR SAM CLASSIFICATION
-    # ============================================================
-    print('\n' + '-' * 60)
-    print('APPLYING POST-CORRECTION PREPROCESSING FIXES')
-    print('-' * 60)
-
-    print('\n[Fix 1/3] Clipping reflectance outliers...')
-    R = clip_reflectance_outliers(R, percentile=99.5)
-
-    print('\n[Fix 2/3] Masking water vapor absorption bands...')
-    R, good_bands_mask = mask_water_vapor_bands(R, bands)
-
-    print('\n[Fix 3/3] Smoothing VNIR-SWIR detector transition...')
-    R = normalize_vnir_swir_transition(R, bands, transition_wavelength=920)
-
-    print('\n' + '-' * 60)
-    print('POST-CORRECTION FIXES COMPLETE!')
-    print('-' * 60)
-
-    if not topo:
-        print('\nSaving the reflectance image (flat surface)...')
-        surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
-        # Fix HDR file for SNAP compatibility
-        fix_envi_hdr_for_snap(pathToOutImage + '.hdr',
-                              wavelength_file=snap_wavelength_file,
-                              keep_wavelength=snap_keep_wavelength)
-    else:
+    if topo:
         print('\n--- TOPOGRAPHIC CORRECTION ---')
 
         if smartsAlbedoFilePath is None:
@@ -1116,66 +1037,73 @@ def atmospheric_correction(pathToRadianceImage, pathToOutImage, stepAltit=1, ste
                                                            wazim * np.pi / 180, zenith * np.pi / 180,
                                                            azimuth * np.pi / 180)
 
-            # --------------------------------------------------------
-            # CRITICAL: Apply corrections to topo-corrected reflectance
-            # getDemReflectance/MM_topo_correction produce a new R that
-            # also has extreme values in water absorption bands (where
-            # atmospheric transmittance ~ 0 causes division by near-zero).
-            # The earlier corrections (lines 964-1058) were applied to the
-            # flat-terrain R which was overwritten - must re-apply here.
-            # --------------------------------------------------------
-            print('\n--- Correcting topo-corrected reflectance ---')
+    # ============================================================
+    # APPLY CORRECTIONS TO FINAL R (regardless of topo/non-topo path)
+    # ============================================================
+    # NOTE: Corrections are applied AFTER the topo branch so that:
+    # 1. writeAlbedoFile receives R in the raw scale from computeLtoR
+    #    (it expects reflectance in 0-100 percent, see atmoCorrection.py:1614)
+    # 2. getDemReflectance is not affected by premature scale correction
+    # 3. The final R (whether flat or topo-corrected) gets all corrections
+    # ============================================================
 
-            # Bad band removal using MAD (Median Absolute Deviation)
-            max_per_band_t = np.max(R, axis=(0,1))
-            median_max_t = np.median(max_per_band_t)
-            mad_t = np.median(np.abs(max_per_band_t - median_max_t))
-            bad_threshold_t = median_max_t + (10 * mad_t * 1.4826)
-            bad_idx_t = np.where(max_per_band_t > bad_threshold_t)[0]
-            if len(bad_idx_t) > 0:
-                print(f'  Masking {len(bad_idx_t)} bad bands in topo-corrected R')
-                for idx in bad_idx_t[:10]:
-                    print(f'    Band #{idx+1} ({bands[idx]:.2f} nm): max = {max_per_band_t[idx]:.2e}')
-                if len(bad_idx_t) > 10:
-                    print(f'    ... and {len(bad_idx_t)-10} more')
-                R[:, :, bad_idx_t] = np.nan
-            else:
-                print(f'  No extreme bad bands detected in topo R')
+    print('\n' + '-' * 60)
+    print('APPLYING POST-CORRECTION FIXES TO FINAL REFLECTANCE')
+    print('-' * 60)
 
-            # Scale correction from clean data
-            valid_R_t = R[np.isfinite(R) & (R > 0)]
-            if len(valid_R_t) > 0:
-                p99_t = np.percentile(valid_R_t, 99)
-                print(f'  Topo R 99th percentile: {p99_t:.6e}')
-                if p99_t > 100:
-                    if p99_t > 5000:
-                        target_t = 8000
-                    else:
-                        target_t = 0.8
-                    correction_factor_t = p99_t / target_t
-                    print(f'  Scale correction: R = R / {correction_factor_t:.2f}')
-                    R = R / correction_factor_t
-                else:
-                    print(f'  Scale is correct - no correction needed')
+    # Bad band removal using MAD (Median Absolute Deviation)
+    max_per_band_final = np.max(R, axis=(0,1))
+    median_max_final = np.median(max_per_band_final)
+    mad_final = np.median(np.abs(max_per_band_final - median_max_final))
+    bad_threshold_final = median_max_final + (10 * mad_final * 1.4826)
+    bad_idx_final = np.where(max_per_band_final > bad_threshold_final)[0]
+    if len(bad_idx_final) > 0:
+        print(f'\n  Masking {len(bad_idx_final)} bad bands (extreme values)')
+        for idx in bad_idx_final[:10]:
+            print(f'    Band #{idx+1} ({bands[idx]:.2f} nm): max = {max_per_band_final[idx]:.2e}')
+        if len(bad_idx_final) > 10:
+            print(f'    ... and {len(bad_idx_final)-10} more')
+        R[:, :, bad_idx_final] = np.nan
+    else:
+        print(f'\n  No extreme bad bands detected')
 
-            # Post-correction fixes
-            print('\n  Clipping reflectance outliers...')
-            R = clip_reflectance_outliers(R, percentile=99.5)
-            print('\n  Masking water vapor absorption bands...')
-            R, good_bands_mask = mask_water_vapor_bands(R, bands)
-            print('\n  Smoothing VNIR-SWIR detector transition...')
-            R = normalize_vnir_swir_transition(R, bands, transition_wavelength=920)
+    # Scale validation (diagnostic only - no auto-correction)
+    # The SUREHYP library uses reflectance in percent (0-100 range)
+    # saveRimage multiplies by scaleFactor=100, writeAlbedoFile divides by 100
+    valid_R_final = R[np.isfinite(R) & (R > 0)]
+    if len(valid_R_final) > 0:
+        p99_final = np.percentile(valid_R_final, 99)
+        p50_final = np.median(valid_R_final)
+        print(f'\n  Reflectance statistics (before save):')
+        print(f'    Min:    {np.min(valid_R_final):.6e}')
+        print(f'    Median: {p50_final:.6e}')
+        print(f'    99th %: {p99_final:.6e}')
+        print(f'    Max:    {np.max(valid_R_final):.6e}')
 
-            print('\nSaving the reflectance image (with topographic correction)...')
-            surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
-        else:
-            # Topographic correction failed, save flat-terrain reflectance
-            print('\nSaving the reflectance image (flat terrain - topo correction skipped)...')
-            surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
-        # Fix HDR file for SNAP compatibility
-        fix_envi_hdr_for_snap(pathToOutImage + '.hdr',
-                              wavelength_file=snap_wavelength_file,
-                              keep_wavelength=snap_keep_wavelength)
+    print('\n  Clipping reflectance outliers...')
+    R = clip_reflectance_outliers(R, percentile=99.5)
+
+    print('\n  Masking water vapor absorption bands...')
+    R, good_bands_mask = mask_water_vapor_bands(R, bands)
+
+    print('\n  Smoothing VNIR-SWIR detector transition...')
+    R = normalize_vnir_swir_transition(R, bands, transition_wavelength=920)
+
+    print('\n' + '-' * 60)
+    print('POST-CORRECTION FIXES COMPLETE!')
+    print('-' * 60)
+
+    # Save reflectance image
+    if topo:
+        print('\nSaving the reflectance image (with topographic correction)...')
+    else:
+        print('\nSaving the reflectance image (flat surface)...')
+    surehyp.atmoCorrection.saveRimage(R, metadata, pathToOutImage)
+
+    # Fix HDR file for SNAP compatibility
+    fix_envi_hdr_for_snap(pathToOutImage + '.hdr',
+                          wavelength_file=snap_wavelength_file,
+                          keep_wavelength=snap_keep_wavelength)
 
     # Save masks
     pathOutDir = os.path.dirname(pathToOutImage) + '/'
