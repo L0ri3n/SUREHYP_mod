@@ -1144,6 +1144,11 @@ def create_rgb_quicklook(R, bands, output_path, stretch_percentile=2):
     green_idx = np.argmin(np.abs(bands - 550))  # ~550 nm
     blue_idx = np.argmin(np.abs(bands - 480))   # ~480 nm
 
+    # Print the bands used
+    print(f'    Bands used - R: #{red_idx+1} ({bands[red_idx]:.1f} nm), '
+          f'G: #{green_idx+1} ({bands[green_idx]:.1f} nm), '
+          f'B: #{blue_idx+1} ({bands[blue_idx]:.1f} nm)')
+
     # Extract RGB bands
     red = R[:, :, red_idx].astype(float)
     green = R[:, :, green_idx].astype(float)
@@ -1204,6 +1209,11 @@ def create_false_color_quicklook(R, bands, output_path, stretch_percentile=2):
     red_idx = np.argmin(np.abs(bands - 660))    # ~660 nm
     green_idx = np.argmin(np.abs(bands - 550))  # ~550 nm
 
+    # Print the bands used
+    print(f'    Bands used - NIR: #{nir_idx+1} ({bands[nir_idx]:.1f} nm), '
+          f'R: #{red_idx+1} ({bands[red_idx]:.1f} nm), '
+          f'G: #{green_idx+1} ({bands[green_idx]:.1f} nm)')
+
     # Extract bands
     nir = R[:, :, nir_idx].astype(float)
     red = R[:, :, red_idx].astype(float)
@@ -1263,6 +1273,10 @@ def compute_ndvi(R, bands):
     # Find band indices
     nir_idx = np.argmin(np.abs(bands - 860))   # ~860 nm
     red_idx = np.argmin(np.abs(bands - 660))   # ~660 nm
+
+    # Print the bands used
+    print(f'    Bands used - NIR: #{nir_idx+1} ({bands[nir_idx]:.1f} nm), '
+          f'RED: #{red_idx+1} ({bands[red_idx]:.1f} nm)')
 
     nir = R[:, :, nir_idx].astype(float)
     red = R[:, :, red_idx].astype(float)
