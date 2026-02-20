@@ -109,6 +109,14 @@ def fix_envi_hdr_for_snap(hdr_path, wavelength_file=None, keep_wavelength=False)
                 fwhm = fwhm_values[i] if i < len(fwhm_values) else "N/A"
                 f.write(f"band_{i+1}, {wl}, {fwhm}\n")
 
+        # Save SCP-compatible wavelength CSV (one wavelength per line)
+        # Format: just wavelength values separated by newlines (for QGIS SCP plugin)
+        scp_csv_path = hdr_path.replace('.hdr', '_wavelengths_scp.csv')
+        with open(scp_csv_path, 'w') as f:
+            for wl in wavelengths:
+                f.write(f"{wl}\n")
+        print(f"    SCP wavelength CSV saved to: {scp_csv_path}")
+
     # Generate simple band names (band_1, band_2, etc.) - no wavelength to avoid SNAP issues
     if wavelengths:
         band_names = [f'band_{i+1}' for i in range(len(wavelengths))]
@@ -186,6 +194,93 @@ def fix_envi_hdr_for_snap(hdr_path, wavelength_file=None, keep_wavelength=False)
             print(f"    Wavelength field removed from HDR to avoid band math issues")
     else:
         print(f"    HDR file already SNAP-compatible: {hdr_path}")
+
+
+def restore_wavelengths_to_hdr(hdr_path, spectral_info_path=None):
+    """
+    Restore wavelength and FWHM data to an HDR file from its spectral_info.txt backup.
+
+    Use this function to fix HDR files that were processed with keep_wavelength=False
+    and need wavelengths restored for use in QGIS/SCP or other software.
+
+    Parameters:
+    -----------
+    hdr_path : str
+        Path to the .hdr file to restore wavelengths to
+    spectral_info_path : str, optional
+        Path to the spectral_info.txt file. If not provided, will look for
+        <hdr_basename>_spectral_info.txt in the same directory
+    """
+    if not os.path.exists(hdr_path):
+        print(f"    Error: HDR file not found: {hdr_path}")
+        return False
+
+    # Find spectral info file
+    if spectral_info_path is None:
+        spectral_info_path = hdr_path.replace('.hdr', '_spectral_info.txt')
+
+    if not os.path.exists(spectral_info_path):
+        print(f"    Error: Spectral info file not found: {spectral_info_path}")
+        print("    Cannot restore wavelengths without spectral info backup.")
+        return False
+
+    # Load wavelengths and FWHM from spectral info file
+    wavelengths = []
+    fwhm_values = []
+
+    with open(spectral_info_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split(',')
+            if len(parts) >= 2:
+                wavelengths.append(parts[1].strip())
+                if len(parts) >= 3 and parts[2].strip() != 'N/A':
+                    fwhm_values.append(parts[2].strip())
+
+    if not wavelengths:
+        print("    Error: No wavelength data found in spectral info file")
+        return False
+
+    print(f"    Loaded {len(wavelengths)} wavelengths from: {spectral_info_path}")
+
+    # Read current HDR content
+    with open(hdr_path, 'r') as f:
+        content = f.read()
+
+    original_content = content
+
+    # Add wavelength field
+    wavelength_str = ' , '.join(wavelengths)
+
+    if re.search(r'wavelength\s*=', content, re.IGNORECASE):
+        # Update existing wavelength field
+        content = re.sub(r'wavelength\s*=\s*\{[^}]*\}', f'wavelength = {{ {wavelength_str} }}', content, flags=re.IGNORECASE)
+    else:
+        # Add wavelength field after band names or bands count
+        if re.search(r'band names\s*=', content, re.IGNORECASE):
+            content = re.sub(r'(band names\s*=\s*\{[^}]*\})', f'\\1\nwavelength = {{ {wavelength_str} }}', content, flags=re.IGNORECASE)
+        else:
+            content = re.sub(r'(bands\s*=\s*\d+)', f'\\1\nwavelength = {{ {wavelength_str} }}', content)
+
+    # Add FWHM if available
+    if fwhm_values and len(fwhm_values) == len(wavelengths):
+        fwhm_str = ' , '.join(fwhm_values)
+        if re.search(r'fwhm\s*=', content, re.IGNORECASE):
+            content = re.sub(r'fwhm\s*=\s*\{[^}]*\}', f'fwhm = {{ {fwhm_str} }}', content, flags=re.IGNORECASE)
+        else:
+            content = re.sub(r'(wavelength\s*=\s*\{[^}]*\})', f'\\1\nfwhm = {{ {fwhm_str} }}', content, flags=re.IGNORECASE)
+
+    # Write back if changes were made
+    if content != original_content:
+        with open(hdr_path, 'w') as f:
+            f.write(content)
+        print(f"    Wavelengths restored to: {hdr_path}")
+        return True
+    else:
+        print(f"    HDR file already has wavelength data: {hdr_path}")
+        return False
 
 
 def getGEEdem_fixed(UL_lat, UL_lon, UR_lat, UR_lon, LL_lat, LL_lon, LR_lat, LR_lon,
@@ -1373,6 +1468,24 @@ def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus
     # Use nansum to handle NaN values in masked water vapor bands
     valid_reflectance = np.nansum(R, axis=2) > 0
 
+    # Keep the full-size mask so the caller can index into un-cropped arrays
+    valid_reflectance_full = valid_reflectance
+
+    # Crop to the bounding box of valid data to exclude black fill areas
+    # (Hyperion swath is diagonal within the rectangular array)
+    rows_with_valid = np.any(valid_reflectance, axis=1)
+    cols_with_valid = np.any(valid_reflectance, axis=0)
+    if rows_with_valid.any() and cols_with_valid.any():
+        row_min, row_max = np.where(rows_with_valid)[0][[0, -1]]
+        col_min, col_max = np.where(cols_with_valid)[0][[0, -1]]
+        R = R[row_min:row_max + 1, col_min:col_max + 1, :]
+        valid_reflectance = valid_reflectance[row_min:row_max + 1, col_min:col_max + 1]
+        if clearview_mask is not None:
+            clearview_mask = clearview_mask[row_min:row_max + 1, col_min:col_max + 1]
+        if cirrus_mask is not None:
+            cirrus_mask = cirrus_mask[row_min:row_max + 1, col_min:col_max + 1]
+        print(f'    Cropped to valid data bounding box: rows [{row_min}:{row_max}], cols [{col_min}:{col_max}]')
+
     # Create a classification map
     # 0 = Invalid/No data, 1 = Valid clear, 2 = Cirrus affected, 3 = Cloud/shadow
     pixel_class = np.zeros(R.shape[:2], dtype=np.uint8)
@@ -1388,7 +1501,19 @@ def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus
         pixel_class[(valid_reflectance) & (clearview_mask == 0)] = 3
 
     # Count pixels in each category
+    # n_total   = bounding-box area (includes fill corners)
+    # swath_mask = per-row footprint: all columns between first and last valid pixel
+    #              → captures intra-swath gaps (scan-line dropouts, clouds, water, etc.)
+    #              while still excluding the diagonal fill corners outside the swath
     n_total = R.shape[0] * R.shape[1]
+    swath_mask = np.zeros(valid_reflectance.shape, dtype=bool)
+    for r in range(valid_reflectance.shape[0]):
+        row = valid_reflectance[r]
+        if row.any():
+            first_col = int(np.argmax(row))
+            last_col = int(valid_reflectance.shape[1] - 1 - np.argmax(row[::-1]))
+            swath_mask[r, first_col:last_col + 1] = True
+    n_swath = int(np.sum(swath_mask))
     n_invalid = np.sum(pixel_class == 0)
     n_valid_clear = np.sum(pixel_class == 1)
     n_cirrus = np.sum(pixel_class == 2)
@@ -1407,18 +1532,19 @@ def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus
     axes[0].set_title('Valid Pixel Distribution', fontsize=14, fontweight='bold')
     axes[0].axis('off')
 
-    # Create custom legend
+    # Create custom legend — all percentages relative to swath footprint area
+    n_invalid_swath_legend = n_swath - n_valid_clear - n_cirrus - n_cloud
     legend_elements = [
-        Patch(facecolor='black', label=f'No Data: {n_invalid} ({100*n_invalid/n_total:.1f}%)'),
-        Patch(facecolor='green', label=f'Valid Clear: {n_valid_clear} ({100*n_valid_clear/n_total:.1f}%)'),
+        Patch(facecolor='black', label=f'No Data: {n_invalid_swath_legend} ({100*n_invalid_swath_legend/n_swath:.1f}% of swath)'),
+        Patch(facecolor='green', label=f'Valid Clear: {n_valid_clear} ({100*n_valid_clear/n_swath:.1f}% of swath)'),
     ]
     if n_cirrus > 0:
         legend_elements.append(
-            Patch(facecolor='yellow', label=f'Cirrus Affected: {n_cirrus} ({100*n_cirrus/n_total:.1f}%)')
+            Patch(facecolor='yellow', label=f'Cirrus Affected: {n_cirrus} ({100*n_cirrus/n_swath:.1f}% of swath)')
         )
     if n_cloud > 0:
         legend_elements.append(
-            Patch(facecolor='red', label=f'Cloud/Shadow: {n_cloud} ({100*n_cloud/n_total:.1f}%)')
+            Patch(facecolor='red', label=f'Cloud/Shadow: {n_cloud} ({100*n_cloud/n_swath:.1f}% of swath)')
         )
 
     axes[0].legend(handles=legend_elements, loc='upper right', fontsize=10)
@@ -1470,14 +1596,16 @@ def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus
     axes[1, 0].axis('off')
     plt.colorbar(im3, ax=axes[1, 0], label='Reflectance', shrink=0.8)
 
-    # Plot 4: Pie chart of pixel categories
+    # Plot 4: Pie chart of pixel categories — swath pixels only (no bbox fill)
+    # n_invalid inside the swath = swath pixels that still have no valid data
+    n_invalid_swath = n_swath - n_valid_clear - n_cirrus - n_cloud
     categories = []
     sizes = []
     colors_pie = []
 
-    if n_invalid > 0:
-        categories.append(f'No Data\n{n_invalid} px')
-        sizes.append(n_invalid)
+    if n_invalid_swath > 0:
+        categories.append(f'No Data (swath)\n{n_invalid_swath} px')
+        sizes.append(n_invalid_swath)
         colors_pie.append('black')
     if n_valid_clear > 0:
         categories.append(f'Valid Clear\n{n_valid_clear} px')
@@ -1521,7 +1649,7 @@ def visualize_valid_pixels(R, bands, pathOut, fname, clearview_mask=None, cirrus
         'valid_per_col': valid_per_col
     }
 
-    return stats, valid_reflectance
+    return stats, valid_reflectance_full
 
 
 def post_processing(R, bands, pathOut, fname):
@@ -1944,3 +2072,17 @@ if __name__ == '__main__':
     print(f'  - NDVI:                  {pathOut + fname}_NDVI.npy')
     print(f'  - Statistics:            {pathOut + fname}_statistics.txt')
     print(f'  - Quicklooks:            {pathOut}quicklooks/')
+
+    # ============================================================
+    # UTILITY: Restore wavelengths to existing HDR files
+    # ============================================================
+    # If you have existing HDR files without wavelength data (showing only band
+    # numbers in QGIS/SCP), uncomment the following lines to restore wavelengths
+    # from the spectral_info.txt backup file.
+    #
+    # Example usage:
+    # restore_wavelengths_to_hdr(pathOut + nameOut_reflectance + '.hdr')
+    #
+    # Or for a specific file:
+    # restore_wavelengths_to_hdr('C:/path/to/your_file.hdr')
+    # ============================================================
